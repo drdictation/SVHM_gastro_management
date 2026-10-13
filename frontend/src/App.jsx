@@ -7,6 +7,37 @@ import { api, isSupabaseConfigured } from './api';
 import { generateLeavePdf } from './pdfGenerator';
 import { parseRosterFile } from './rosterParser';
 
+// Helper: Get Melbourne Date
+function getMelbourneDate() {
+  const s = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Australia/Melbourne',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(new Date());
+  return new Date(`${s}T00:00:00`);
+}
+
+// Helper: Get Monday of given or current Melbourne week
+function getMondayOfCurrentWeek() {
+  const d = getMelbourneDate();
+  const day = d.getDay(); // 0 is Sun, 1 is Mon
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  d.setDate(diff);
+  return d.toISOString().slice(0, 10);
+}
+
+// Helper: Format YYYY-MM-DD or date object to DD/MM/YYYY
+export function formatDDMMYYYY(dateInput) {
+  if (!dateInput) return '';
+  const str = String(dateInput).slice(0, 10);
+  const parts = str.split('-');
+  if (parts.length === 3 && parts[0].length === 4) {
+    return `${parts[2]}/${parts[1]}/${parts[0]}`;
+  }
+  return str;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('weekly'); // weekly | roster | swaps | leave | upload
   const [staffList, setStaffList] = useState([]);
@@ -15,8 +46,8 @@ export default function App() {
   const [pinVerified, setPinVerified] = useState(false);
   const [showPinModal, setShowPinModal] = useState(false);
 
-  // Weekly digest
-  const [weekMonday, setWeekMonday] = useState("2026-03-16");
+  // Weekly digest initialized to current Melbourne week Monday
+  const [weekMonday, setWeekMonday] = useState(getMondayOfCurrentWeek());
   const [rosterEntries, setRosterEntries] = useState([]);
   
   // Roster view filters
@@ -259,7 +290,7 @@ export default function App() {
             <div className="flex flex-col sm:flex-row items-center justify-between bg-white p-4 rounded-xl shadow-sm border border-slate-200 gap-4">
               <div className="flex items-center gap-2">
                 <button onClick={() => shiftWeek(-7)} className="p-2 border rounded hover:bg-slate-50"><ChevronLeft className="w-4 h-4" /></button>
-                <div className="font-semibold text-slate-800">Week Commencing Monday: {weekMonday}</div>
+                <div className="font-semibold text-slate-800">Week Commencing Monday: {formatDDMMYYYY(weekMonday)}</div>
                 <button onClick={() => shiftWeek(7)} className="p-2 border rounded hover:bg-slate-50"><ChevronRight className="w-4 h-4" /></button>
               </div>
               <div className="text-sm text-slate-500">
@@ -365,7 +396,7 @@ export default function App() {
                     const isMe = currentUser && e.staff_name.toLowerCase().includes(currentUser.name.toLowerCase());
                     return (
                       <tr key={e.id} className={isMe ? 'bg-amber-50/60' : 'hover:bg-slate-50'}>
-                        <td className="p-2.5 font-medium">{e.date}</td>
+                        <td className="p-2.5 font-medium">{formatDDMMYYYY(e.date)}</td>
                         <td className="p-2.5 capitalize">{e.entry_type.replace('_', ' ')}</td>
                         <td className="p-2.5 font-semibold text-slate-900">{e.staff_name}</td>
                         <td className="p-2.5 text-slate-500">{e.role_label || '-'}</td>
@@ -555,7 +586,7 @@ export default function App() {
                     <div key={app.id} className="border p-3 rounded text-xs flex items-center justify-between bg-slate-50">
                       <div>
                         <div className="font-bold text-slate-900">{app.staff_name} — {app.leave_type}</div>
-                        <div className="text-slate-500">{app.start_date} to {app.end_date} ({app.leave_hours || 'N/A'} hrs)</div>
+                        <div className="text-slate-500">{formatDDMMYYYY(app.start_date)} to {formatDDMMYYYY(app.end_date)} ({app.leave_hours || 'N/A'} hrs)</div>
                       </div>
                       <button
                         onClick={() => generateLeavePdf(app)}
