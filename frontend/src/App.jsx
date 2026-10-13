@@ -28,6 +28,15 @@ function getMondayOfCurrentWeek() {
   return d.toISOString().slice(0, 10);
 }
 
+// Helper: Normalize name for matching (strips Dr, Prof, Assoc, etc)
+function matchDoctorName(nameA, nameB) {
+  if (!nameA || !nameB) return false;
+  const clean = s => s.toLowerCase().replace(/^(dr\.?|prof\.?|assoc\.?|mr\.?|ms\.?)\s+/i, '').trim();
+  const a = clean(nameA);
+  const b = clean(nameB);
+  return a.includes(b) || b.includes(a);
+}
+
 // Helper: Format YYYY-MM-DD or date object to DD/MM/YYYY
 export function formatDDMMYYYY(dateInput) {
   if (!dateInput) return '';
@@ -323,21 +332,24 @@ export default function App() {
                       ) : (
                         <ul className="space-y-2 text-sm">
                           {entries.map(e => {
-                            const isMe = currentUser && e.staff_name.toLowerCase().includes(currentUser.name.toLowerCase());
+                            const isMe = currentUser && matchDoctorName(e.staff_name, currentUser.name);
                             return (
                               <li key={e.id} className={`p-2 rounded border text-xs flex justify-between items-center ${isMe ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'}`}>
                                 <div>
                                   <div className="font-semibold text-slate-900">{e.staff_name}</div>
                                   <div className="text-slate-500">{e.role_label || e.title}</div>
                                 </div>
-                                {isMe && (
-                                  <button
-                                    onClick={() => handleOpenSwapModal(e)}
-                                    className="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs"
-                                  >
-                                    Swap
-                                  </button>
-                                )}
+                                <button
+                                  onClick={() => handleOpenSwapModal(e)}
+                                  className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                                    isMe
+                                      ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                                      : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
+                                  }`}
+                                  title={isMe ? 'Swap your shift' : 'Initiate swap for this shift'}
+                                >
+                                  Swap
+                                </button>
                               </li>
                             );
                           })}
@@ -404,22 +416,22 @@ export default function App() {
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {filteredRoster.map(e => {
-                    const isMe = currentUser && e.staff_name.toLowerCase().includes(currentUser.name.toLowerCase());
+                    const isMe = currentUser && matchDoctorName(e.staff_name, currentUser.name);
                     return (
                       <tr key={e.id} className={isMe ? 'bg-amber-50/60' : 'hover:bg-slate-50'}>
                         <td className="p-2.5 font-medium">{formatDDMMYYYY(e.date)}</td>
                         <td className="p-2.5 capitalize">{e.entry_type.replace('_', ' ')}</td>
-                        <td className="p-2.5 font-semibold text-slate-900">{e.staff_name}</td>
+                        <td className="p-2.5 font-semibold text-slate-900">
+                          {e.staff_name} {isMe && <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-normal ml-1">You</span>}
+                        </td>
                         <td className="p-2.5 text-slate-500">{e.role_label || '-'}</td>
                         <td className="p-2.5">
-                          {isMe && (
-                            <button
-                              onClick={() => handleOpenSwapModal(e)}
-                              className="text-blue-600 hover:underline font-medium"
-                            >
-                              Request Swap
-                            </button>
-                          )}
+                          <button
+                            onClick={() => handleOpenSwapModal(e)}
+                            className="text-blue-600 hover:text-blue-800 hover:underline font-medium text-xs flex items-center gap-1"
+                          >
+                            <ArrowRightLeft className="w-3 h-3" /> Swap
+                          </button>
                         </td>
                       </tr>
                     );
