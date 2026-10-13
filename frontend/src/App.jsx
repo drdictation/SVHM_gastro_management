@@ -6,6 +6,7 @@ import {
 import { api, isSupabaseConfigured } from './api';
 import { generateLeavePdf } from './pdfGenerator';
 import { parseRosterFile } from './rosterParser';
+import BulletinManager from './BulletinManager';
 
 // Helper: Get Melbourne Date
 function getMelbourneDate() {
@@ -253,6 +254,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 flex border-t border-blue-800 overflow-x-auto">
           {[
             { id: 'weekly', label: 'Weekly Schedule', icon: Calendar },
+            { id: 'bulletin', label: 'Weekly Bulletin', icon: FileText },
             { id: 'roster', label: 'Full Roster', icon: Clock },
             { id: 'swaps', label: `Shift Swaps (${swaps.filter(s => s.status.startsWith('pending')).length})`, icon: ArrowRightLeft },
             { id: 'leave', label: 'Leave Applications', icon: FileText },
@@ -349,7 +351,16 @@ export default function App() {
           </section>
         )}
 
-        {/* TAB 2: FULL ROSTER */}
+        {/* TAB 2: BULLETIN */}
+        {activeTab === 'bulletin' && (
+          <BulletinManager
+            weekMonday={weekMonday}
+            rosterEntries={rosterEntries}
+            currentUser={currentUser}
+          />
+        )}
+
+        {/* TAB 3: FULL ROSTER */}
         {activeTab === 'roster' && (
           <section className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
             <div className="flex flex-col sm:flex-row gap-3 items-center justify-between">

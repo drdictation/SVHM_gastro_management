@@ -149,5 +149,26 @@ export const api = {
       current[idx].status = status;
       localStorage.setItem(LS_LEAVE, JSON.stringify(current));
     }
+  },
+
+  // Bulletin
+  async getBulletin(weekMonday) {
+    const key = `svha_gastro_bulletin_${weekMonday}`;
+    const saved = localStorage.getItem(key);
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    return null;
+  },
+
+  async saveBulletin(weekMonday, bulletinData) {
+    const key = `svha_gastro_bulletin_${weekMonday}`;
+    localStorage.setItem(key, JSON.stringify(bulletinData));
+    return bulletinData;
   }
 };
+
