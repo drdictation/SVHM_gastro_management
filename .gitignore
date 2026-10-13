@@ -1,0 +1,13 @@
+# Dependencies
+node_modules
+dist
+venv
+__pycache__
+*.pyc
+
+# Local files & system
+.DS_Store
+*.db
+~$*
+.env
+.env.local
