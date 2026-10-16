@@ -19,13 +19,17 @@ const LS_LEAVE = 'svha_gastro_leave';
 const LS_THEATRE_TEMPLATES = 'svha_gastro_theatre_templates_v1';
 const LS_ENDO_OVERRIDES = 'svha_gastro_endo_overrides_v1';
 const LS_LEAVE_SEED_VER = 'svha_gastro_leave_seed_v3_theatre';
+const LS_ROSTER_SEED_VER = 'svha_gastro_roster_seed_v2_gicc_fjc';
 
 // Init local storage if empty or if leave seed was updated from V2 Dec 26 CSV
 function initLocalStore() {
   if (!localStorage.getItem(LS_STAFF)) {
     localStorage.setItem(LS_STAFF, JSON.stringify(initialSeed.staff));
   }
-  if (!localStorage.getItem(LS_ROSTER)) {
+  if (localStorage.getItem(LS_ROSTER_SEED_VER) !== '1') {
+    localStorage.setItem(LS_ROSTER, JSON.stringify(initialSeed.roster));
+    localStorage.setItem(LS_ROSTER_SEED_VER, '1');
+  } else if (!localStorage.getItem(LS_ROSTER)) {
     localStorage.setItem(LS_ROSTER, JSON.stringify(initialSeed.roster));
   }
   if (!localStorage.getItem(LS_SWAPS)) {

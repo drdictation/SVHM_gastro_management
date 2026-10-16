@@ -4,6 +4,7 @@ import os
 import sqlite3
 import datetime
 import re
+import csv
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gastro_roster.db")
@@ -21,12 +22,26 @@ def parse_date(val):
             pass
     return None
 
+CUSTOM_MAP = {
+    'Alex Thompson': 'Prof. Alex Thompson',
+    'Prof Alex Thompson': 'Prof. Alex Thompson',
+    'Jacinta Holmes': 'Assoc Prof Jacinta Holmes',
+    'Prof Jessica Howell': 'Assoc Prof Jessica Howell',
+    'Dan Tassone': 'Dan Tassone',
+    'Daniel Tassone': 'Dan Tassone',
+    'Nik Vootukuru': 'Nikil Vootukuru',
+    'Nikil Vootukuru': 'Nikil Vootukuru',
+    'Kyle Wu': 'Dr Kyle Wu',
+    'Declan Connoley': 'Dr Declan Connoley',
+    'Tara Fox': 'Dr Tara Fox',
+}
+
 def clean_name(name):
     if not name:
         return ""
     name = str(name).strip()
-    # Remove prefix titles if any or keep consistent
-    return name
+    return CUSTOM_MAP.get(name, name)
+
 
 def import_all():
     from database import init_db
@@ -112,9 +127,42 @@ def import_all():
                     ('consults', date_val, 'Monday-Sunday', 'Consults Consultant', s_name, 'Consultant', None, holiday, s_name)
                 )
 
-    # 3. Import GICC 2026 V2.xlsx
+    # 3. Import GICC (Prefer GICC 2026.csv, fallback to GICC 2026 V2.xlsx)
+    gicc_csv = os.path.join(BASE_DIR, "GICC 2026.csv")
     gicc_file = os.path.join(BASE_DIR, "GICC 2026 V2.xlsx")
-    if os.path.exists(gicc_file):
+    if os.path.exists(gicc_csv):
+        with open(gicc_csv, "r", encoding="utf-8-sig") as f:
+            for row in csv.reader(f):
+                if len(row) > 2 and row[2].strip() and (row[2].strip().startswith("2026-") or row[2].strip().startswith("2027-")):
+                    date_val = row[2].strip()
+                    holiday = row[0].strip() if row[0].strip() else None
+                    meeting_format = row[3].strip() if len(row) > 3 and row[3].strip() else None
+                    chair = row[4].strip() if len(row) > 4 else ""
+                    spk1 = row[5].strip() if len(row) > 5 else ""
+                    spk2 = row[6].strip() if len(row) > 6 else ""
+
+                    if not chair and not spk1 and not spk2:
+                        continue
+
+                    if chair:
+                        norm = clean_name(chair)
+                        cur.execute(
+                            "INSERT INTO roster_entries (entry_type, date, day_of_week, title, staff_name, role_label, notes, holiday, original_staff_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            ('gicc', date_val, 'Monday 12:30pm', 'GICC Meeting Chair', norm, 'Chair', str(meeting_format or ''), holiday, norm)
+                        )
+                    if spk1:
+                        norm = clean_name(spk1)
+                        cur.execute(
+                            "INSERT INTO roster_entries (entry_type, date, day_of_week, title, staff_name, role_label, notes, holiday, original_staff_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            ('gicc', date_val, 'Monday 12:30pm', 'GICC Meeting Speaker 1', norm, 'Speaker 1', str(meeting_format or ''), holiday, norm)
+                        )
+                    if spk2:
+                        norm = clean_name(spk2)
+                        cur.execute(
+                            "INSERT INTO roster_entries (entry_type, date, day_of_week, title, staff_name, role_label, notes, holiday, original_staff_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            ('gicc', date_val, 'Monday 12:30pm', 'GICC Meeting Speaker 2', norm, 'Speaker 2', str(meeting_format or ''), holiday, norm)
+                        )
+    elif os.path.exists(gicc_file):
         wb_g = openpyxl.load_workbook(gicc_file, data_only=True)
         if "GICC roster" in wb_g.sheetnames:
             ws_g = wb_g["GICC roster"]
@@ -147,9 +195,24 @@ def import_all():
                         ('gicc', date_val, 'Monday 12:30pm', 'GICC Meeting Speaker 2', clean_name(spk2), 'Speaker 2', str(meeting_format or ''), holiday, clean_name(spk2))
                     )
 
-    # 4. Import Friday journal club V1.xlsx
+    # 4. Import Friday journal club (Prefer Friday journal club 2026.csv, fallback to Friday journal club V1.xlsx)
+    jc_csv = os.path.join(BASE_DIR, "Friday journal club 2026.csv")
     jc_file = os.path.join(BASE_DIR, "Friday journal club V1.xlsx")
-    if os.path.exists(jc_file):
+    if os.path.exists(jc_csv):
+        with open(jc_csv, "r", encoding="utf-8-sig") as f:
+            for row in csv.reader(f):
+                if len(row) > 3 and row[2].strip() and (row[2].strip().startswith("2026-") or row[2].strip().startswith("2027-")):
+                    date_val = row[2].strip()
+                    presenter = row[3].strip()
+                    if not presenter:
+                        continue
+                    holiday = row[0].strip() if row[0].strip() else None
+                    norm = clean_name(presenter)
+                    cur.execute(
+                        "INSERT INTO roster_entries (entry_type, date, day_of_week, title, staff_name, role_label, notes, holiday, original_staff_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ('friday_jc', date_val, 'Friday 8:00am', 'Friday Journal Club', norm, 'Presenter', None, holiday, norm)
+                    )
+    elif os.path.exists(jc_file):
         wb_jc = openpyxl.load_workbook(jc_file, data_only=True)
         ws_jc = wb_jc.active
         for r in range(7, ws_jc.max_row + 1):

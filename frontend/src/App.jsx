@@ -1,13 +1,23 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Calendar, RefreshCw, Mail, CheckCircle2, XCircle, ArrowRightLeft, 
-  User, UserX, Clock, ShieldCheck, Download, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, Upload, KeyRound
+  User, Clock, ShieldCheck, Download, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, Upload, KeyRound, Stethoscope, Trash2
 } from 'lucide-react';
 import { api, isSupabaseConfigured } from './api';
 import { generateLeavePdf } from './pdfGenerator';
-import { parseRosterFile } from './rosterParser';
+import { parseRosterFile, parseLeaveFile } from './rosterParser';
 import BulletinManager from './BulletinManager';
-import LeaveCalendar, { doesLeaveOverlapRange, getDoctorLeavesForRange } from './LeaveCalendar';
+import TheatreGridManager from './TheatreGridManager';
+import {
+  DAYS_OF_WEEK,
+  GASTRO_ROOMS,
+  matchDoctorName,
+  getCycleWeek,
+  addDaysYMD,
+  findDoctorLeaveOnDate,
+  getWeekEndoSchedule,
+  findLeaveClashes
+} from './theatreGrid';
 
 // Helper: Get Melbourne Date
 function getMelbourneDate() {
@@ -26,21 +36,16 @@ function getMondayOfCurrentWeek() {
   const day = d.getDay(); // 0 is Sun, 1 is Mon
   const diff = d.getDate() - day + (day === 0 ? -6 : 1);
   d.setDate(diff);
-  return d.toISOString().slice(0, 10);
-}
-
-// Helper: Normalize name for matching (strips Dr, Prof, Assoc, etc)
-function matchDoctorName(nameA, nameB) {
-  if (!nameA || !nameB) return false;
-  const clean = s => s.toLowerCase().replace(/^(dr\.?|prof\.?|assoc\.?|mr\.?|ms\.?)\s+/i, '').trim();
-  const a = clean(nameA);
-  const b = clean(nameB);
-  return a.includes(b) || b.includes(a);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dayStr = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dayStr}`;
 }
 
 // Helper: Format YYYY-MM-DD or date object to DD/MM/YYYY
 export function formatDDMMYYYY(dateInput) {
   if (!dateInput) return '';
+  if (String(dateInput).toUpperCase() === 'TBC') return 'TBC';
   const str = String(dateInput).slice(0, 10);
   const parts = str.split('-');
   if (parts.length === 3 && parts[0].length === 4) {
@@ -50,7 +55,7 @@ export function formatDDMMYYYY(dateInput) {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('weekly'); // weekly | roster | swaps | leave | upload
+  const [activeTab, setActiveTab] = useState('weekly'); // weekly | theatre | bulletin | roster | swaps | leave | upload
   const [staffList, setStaffList] = useState([]);
   const [currentUser, setCurrentUser] = useState(null);
   const [pinInput, setPinInput] = useState('');
@@ -60,7 +65,14 @@ export default function App() {
   // Weekly digest initialized to current Melbourne week Monday
   const [weekMonday, setWeekMonday] = useState(getMondayOfCurrentWeek());
   const [rosterEntries, setRosterEntries] = useState([]);
-  
+
+  // Theatre Grid Templates (Weeks 1-4) & Per-Date Endo Overrides
+  const [theatreTemplates, setTheatreTemplates] = useState(null);
+  const [endoOverrides, setEndoOverrides] = useState({});
+  const [coverModalSession, setCoverModalSession] = useState(null);
+  const [coverStaffInput, setCoverStaffInput] = useState('');
+  const [coverStatusInput, setCoverStatusInput] = useState('covered');
+
   // Roster view filters
   const [filterType, setFilterType] = useState('all');
   const [filterDoctor, setFilterDoctor] = useState('');
@@ -75,6 +87,8 @@ export default function App() {
 
   // Leave Form state
   const [leaveApplications, setLeaveApplications] = useState([]);
+  const [leaveFilterMode, setLeaveFilterMode] = useState('all'); // 'all' | 'endo_clashes' | 'needs_cover'
+  const [leaveSearch, setLeaveSearch] = useState('');
   const [leaveForm, setLeaveForm] = useState({
     staff_name: '',
     employee_number: '',
@@ -85,8 +99,8 @@ export default function App() {
     end_date: '',
     leave_hours: '38',
     leave_balance: '',
-    costing: '',
-    allowances: '',
+    costing: '',      // SITE (ENDOSCOPY USE ONLY)
+    allowances: '',   // COVER (ENDOSCOPY USE ONLY)
     submission_date: new Date().toISOString().slice(0, 10),
     manager_name: 'Prof. Alex Thompson'
   });
@@ -103,34 +117,104 @@ export default function App() {
   }, []);
 
   async function loadAll() {
-    const staff = await api.getStaff();
+    const [staff, roster, sw, lv, tmpl, overrides] = await Promise.all([
+      api.getStaff(),
+      api.getRoster(),
+      api.getSwaps(),
+      api.getLeave(),
+      api.getTheatreTemplates(),
+      api.getEndoOverrides()
+    ]);
     setStaffList(staff);
     if (staff.length > 0 && !currentUser) {
-      const def = staff.find(s => s.name.includes("Chamara")) || staff[0];
+      const def = staff.find(s => s.name.includes('Chamara')) || staff[0];
       setCurrentUser(def);
       setLeaveForm(prev => ({ ...prev, staff_name: def.name }));
     }
-    const roster = await api.getRoster();
     setRosterEntries(roster);
-    const sw = await api.getSwaps();
     setSwaps(sw);
-    const lv = await api.getLeave();
     setLeaveApplications(lv);
+    setTheatreTemplates(tmpl);
+    setEndoOverrides(overrides);
   }
 
   // Week navigation
   const shiftWeek = (days) => {
-    const cur = new Date(weekMonday);
-    cur.setDate(cur.getDate() + days);
-    setWeekMonday(cur.toISOString().slice(0, 10));
+    setWeekMonday(addDaysYMD(weekMonday, days));
   };
 
-  const currentWeekEntries = rosterEntries.filter(e => {
-    const d = new Date(e.date);
-    const m = new Date(weekMonday);
-    const diff = (d - m) / (1000 * 60 * 60 * 24);
-    return diff >= 0 && diff < 7;
-  });
+  const currentWeekEntries = useMemo(() => {
+    const sundayStr = addDaysYMD(weekMonday, 6);
+    return rosterEntries.filter(e => e.date >= weekMonday && e.date <= sundayStr);
+  }, [rosterEntries, weekMonday]);
+
+  // Weekly Endoscopy Schedule & Leave Clashes for weekMonday
+  const weekEndoSchedule = useMemo(() => {
+    return getWeekEndoSchedule(weekMonday, theatreTemplates, leaveApplications, endoOverrides);
+  }, [weekMonday, theatreTemplates, leaveApplications, endoOverrides]);
+
+  const weekEndoClashCount = useMemo(() => {
+    return weekEndoSchedule.sessions.filter(s => Boolean(s.leaveClash)).length;
+  }, [weekEndoSchedule]);
+
+  // Live Clash Detection on Leave Form
+  const liveFormClashes = useMemo(() => {
+    if (!leaveForm.staff_name || !leaveForm.start_date) {
+      return { endoClashes: [], rosterClashes: [], cycleWeeks: [], affectedSites: [] };
+    }
+    return findLeaveClashes(
+      leaveForm.staff_name,
+      leaveForm.start_date,
+      leaveForm.end_date || leaveForm.start_date,
+      theatreTemplates,
+      rosterEntries,
+      endoOverrides
+    );
+  }, [leaveForm.staff_name, leaveForm.start_date, leaveForm.end_date, theatreTemplates, rosterEntries, endoOverrides]);
+
+  // Auto-populate SITE (ENDOSCOPY USE ONLY) when start/end dates detect endoscopy clashes
+  useEffect(() => {
+    if (liveFormClashes.affectedSites.length > 0) {
+      const autoSite = liveFormClashes.affectedSites.join(', ');
+      setLeaveForm(prev => ({
+        ...prev,
+        costing: prev.costing || autoSite
+      }));
+    }
+  }, [liveFormClashes.affectedSites.join(',')]);
+
+  // Pre-compute clashes for all stored leave applications
+  const enrichedLeaveList = useMemo(() => {
+    return leaveApplications.map(app => {
+      const clashes = findLeaveClashes(
+        app.staff_name,
+        app.start_date,
+        app.end_date,
+        theatreTemplates,
+        rosterEntries,
+        endoOverrides
+      );
+      return {
+        ...app,
+        clashes
+      };
+    });
+  }, [leaveApplications, theatreTemplates, rosterEntries, endoOverrides]);
+
+  const filteredLeaveList = useMemo(() => {
+    return enrichedLeaveList.filter(item => {
+      if (leaveSearch && !item.staff_name.toLowerCase().includes(leaveSearch.toLowerCase())) {
+        return false;
+      }
+      if (leaveFilterMode === 'endo_clashes') {
+        return item.clashes.endoClashes.length > 0 || Boolean(item.costing);
+      }
+      if (leaveFilterMode === 'needs_cover') {
+        return (item.clashes.endoClashes.length > 0 || Boolean(item.costing)) && !item.allowances;
+      }
+      return true;
+    });
+  }, [enrichedLeaveList, leaveSearch, leaveFilterMode]);
 
   // Filtered Roster entries
   const filteredRoster = rosterEntries.filter(e => {
@@ -154,7 +238,7 @@ export default function App() {
       requester_staff_name: currentUser.name,
       requester_entry_id: selectedEntryToSwap.id,
       peer_staff_name: swapTargetDoctor,
-      reason: swapReason || "Shift swap request"
+      reason: swapReason || 'Shift swap request'
     });
     setSwaps(prev => [newSwap, ...prev]);
     setSwapModalOpen(false);
@@ -169,7 +253,6 @@ export default function App() {
   };
 
   const handleCoordinatorApprove = async (swap) => {
-    // Requires PIN verification
     if (!pinVerified) {
       setShowPinModal(true);
       return;
@@ -178,7 +261,45 @@ export default function App() {
     await api.updateRosterEntry(swap.requester_entry_id, { staff_name: swap.peer_staff_name });
     setSwaps(prev => prev.map(s => s.id === swap.id ? { ...s, status: 'approved' } : s));
     setRosterEntries(prev => prev.map(e => e.id === swap.requester_entry_id ? { ...e, staff_name: swap.peer_staff_name } : e));
-    setStatusMsg(`Swap approved and roster updated!`);
+    setStatusMsg('Swap approved and roster updated!');
+    setTimeout(() => setStatusMsg(''), 4000);
+  };
+
+  // Endoscopy Session Cover Assignment
+  const openCoverModal = (sessionObj) => {
+    setCoverModalSession(sessionObj);
+    setCoverStaffInput(sessionObj.coverDoctor || '');
+    setCoverStatusInput(sessionObj.coverStatus === 'cancelled' ? 'cancelled' : sessionObj.coverStatus === 'vacant' ? 'vacant' : 'covered');
+  };
+
+  const handleSaveSessionCover = async (e) => {
+    e.preventDefault();
+    if (!coverModalSession) return;
+    const nextOverrides = await api.saveEndoOverride(coverModalSession.overrideKey, {
+      cover_staff_name: coverStaffInput.trim(),
+      status: coverStatusInput
+    });
+    setEndoOverrides({ ...nextOverrides });
+
+    // If this session has a matching leave application, also update its COVER (allowances) & SITE (costing)
+    if (coverModalSession.leaveClash?.id) {
+      const lv = coverModalSession.leaveClash;
+      const label = coverStatusInput === 'cancelled'
+        ? 'List Cancelled'
+        : coverStatusInput === 'vacant'
+          ? 'Vacant (Staffing Required)'
+          : coverStaffInput.trim();
+      const updated = await api.updateLeave(lv.id, {
+        costing: lv.costing || `${coverModalSession.room} (${coverModalSession.listType})`,
+        allowances: label
+      });
+      if (updated) {
+        setLeaveApplications(prev => prev.map(item => item.id === lv.id ? updated : item));
+      }
+    }
+
+    setCoverModalSession(null);
+    setStatusMsg(`Updated Endoscopy cover for ${coverModalSession.room} (${coverModalSession.day} ${coverModalSession.session})`);
     setTimeout(() => setStatusMsg(''), 4000);
   };
 
@@ -188,11 +309,15 @@ export default function App() {
     setLeaveSubmitting(true);
     setLeaveSuccess(null);
     try {
-      const record = await api.submitLeave(leaveForm);
+      const autoSites = liveFormClashes.affectedSites.join(', ');
+      const payload = {
+        ...leaveForm,
+        costing: leaveForm.costing || autoSites
+      };
+      const record = await api.submitLeave(payload);
       setLeaveApplications(prev => [record, ...prev]);
-      // Auto generate & trigger download
       generateLeavePdf(record);
-      setLeaveSuccess("Leave application logged in database and official PDF downloaded!");
+      setLeaveSuccess('Leave application logged, Theatre Grid clashes recorded, and official PDF downloaded!');
     } catch (err) {
       console.error(err);
     } finally {
@@ -200,43 +325,75 @@ export default function App() {
     }
   };
 
-  // Leave Calendar CRUD handlers
-  const handleAddLeaveRecord = async (entry) => {
-    const record = await api.submitLeave(entry);
-    setLeaveApplications(prev => [record, ...prev]);
-    setStatusMsg(`Added leave for ${record.staff_name}`);
-    setTimeout(() => setStatusMsg(''), 4000);
+  const handleUpdateLeaveField = async (leaveId, field, value) => {
+    setLeaveApplications(prev =>
+      prev.map(l => (l.id === leaveId ? { ...l, [field]: value } : l))
+    );
+    await api.updateLeave(leaveId, { [field]: value });
   };
 
-  const handleUpdateLeaveRecord = async (id, patch) => {
-    await api.updateLeave(id, patch);
-    setLeaveApplications(prev => prev.map(l => l.id === id ? { ...l, ...patch } : l));
-    setStatusMsg('Leave entry updated.');
-    setTimeout(() => setStatusMsg(''), 3000);
-  };
-
-  const handleDeleteLeaveRecord = async (id) => {
-    await api.deleteLeave(id);
-    setLeaveApplications(prev => prev.filter(l => l.id !== id));
-    setStatusMsg('Leave entry deleted.');
-    setTimeout(() => setStatusMsg(''), 3000);
-  };
-
-  const handleBulkImportLeave = async (records, mode) => {
-    const next = await api.bulkImportLeave(records, mode);
+  const handleDeleteLeave = async (leaveId) => {
+    const next = await api.deleteLeave(leaveId);
     setLeaveApplications(next);
   };
 
-  // Week Sunday helper for Weekly Schedule leave checks
-  const weekSunday = (() => {
-    const d = new Date(`${weekMonday}T00:00:00`);
-    d.setDate(d.getDate() + 6);
-    return d.toISOString().slice(0, 10);
-  })();
+  const handleLeaveCsvUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const parsed = await parseLeaveFile(file, staffList);
+      if (parsed.length === 0) {
+        alert('No valid leave rows found in file.');
+        return;
+      }
+      // Enrich blank costing (SITE) if doctor has Endo clashes
+      const enriched = parsed.map(rec => {
+        const cl = findLeaveClashes(rec.staff_name, rec.start_date, rec.end_date, theatreTemplates, rosterEntries, endoOverrides);
+        return {
+          ...rec,
+          costing: rec.costing || cl.affectedSites.join(', ')
+        };
+      });
+      const next = await api.bulkImportLeave(enriched, 'replace');
+      setLeaveApplications(next);
+      setStatusMsg(`Imported ${next.length} leave records and aligned with Theatre Grid!`);
+      setTimeout(() => setStatusMsg(''), 4000);
+    } catch (err) {
+      console.error(err);
+      alert('Failed to import leave file: ' + err.message);
+    } finally {
+      e.target.value = '';
+    }
+  };
 
-  const currentWeekLeaves = leaveApplications.filter(l =>
-    doesLeaveOverlapRange(l, weekMonday, weekSunday)
-  );
+  const exportLeaveCsv = () => {
+    const headers = [
+      'Name',
+      'Leave start date',
+      'Leave end date',
+      'Type',
+      'Cycle Weeks',
+      'SITE  (ENDOSCOPY USE ONLY)',
+      'COVER  (ENDOSCOPY USE ONLY)'
+    ];
+    const rows = enrichedLeaveList.map(l => [
+      `"${(l.staff_name || '').replace(/"/g, '""')}"`,
+      `"${l.start_date || ''}"`,
+      `"${l.end_date || ''}"`,
+      `"${(l.leave_type || '').replace(/"/g, '""')}"`,
+      `"${l.clashes.cycleWeeks.map(w => `W${w}`).join(', ')}"`,
+      `"${(l.costing || l.clashes.affectedSites.join(', ')).replace(/"/g, '""')}"`,
+      `"${(l.allowances || '').replace(/"/g, '""')}"`
+    ]);
+    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `SMS_Leave_Endoscopy_Aligned_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   // Coordinator file upload
   const handleFileUpload = async (e) => {
@@ -251,11 +408,11 @@ export default function App() {
         setRosterEntries(prev => [...prev, ...parsed]);
         setUploadedCount(parsed.length);
       } else {
-        alert("No valid shifts found in Excel file.");
+        alert('No valid shifts found in Excel file.');
       }
     } catch (err) {
       console.error(err);
-      alert("Failed to parse file: " + err.message);
+      alert('Failed to parse file: ' + err.message);
     } finally {
       setIsUploading(false);
     }
@@ -291,7 +448,7 @@ export default function App() {
             >
               {staffList.map(st => (
                 <option key={st.id || st.name} value={st.name}>
-                  {st.name} {st.is_coordinator ? "(Coordinator)" : ""}
+                  {st.name} {st.is_coordinator ? '(Coordinator)' : ''}
                 </option>
               ))}
             </select>
@@ -301,12 +458,12 @@ export default function App() {
         {/* Navigation Tabs */}
         <div className="max-w-7xl mx-auto px-4 flex border-t border-blue-800 overflow-x-auto">
           {[
-            { id: 'weekly', label: 'Weekly Schedule', icon: Calendar },
-            { id: 'leave_calendar', label: `Who's On Leave (${leaveApplications.length})`, icon: UserX },
+            { id: 'weekly', label: 'Weekly Schedule & Endo', icon: Calendar },
+            { id: 'theatre', label: 'Theatre Grid (W1–W4)', icon: Stethoscope },
+            { id: 'leave', label: 'Leave & Endo Clashes', icon: FileText },
             { id: 'bulletin', label: 'Weekly Bulletin', icon: FileText },
             { id: 'roster', label: 'Full Roster', icon: Clock },
             { id: 'swaps', label: `Shift Swaps (${swaps.filter(s => s.status.startsWith('pending')).length})`, icon: ArrowRightLeft },
-            { id: 'leave', label: 'Leave Applications', icon: FileText },
             { id: 'upload', label: 'Roster Ingestion', icon: Upload },
           ].map(tab => {
             const Icon = tab.icon;
@@ -335,58 +492,204 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 1: WEEKLY DIGEST */}
+        {/* TAB 1: WEEKLY DIGEST + ENDOSCOPY THEATRE GRID */}
         {activeTab === 'weekly' && (
           <section className="space-y-6">
-            <div className="flex flex-col sm:flex-row items-center justify-between bg-white p-4 rounded-xl shadow-sm border border-slate-200 gap-4">
-              <div className="flex items-center gap-2">
-                <button onClick={() => shiftWeek(-7)} className="p-2 border rounded hover:bg-slate-50"><ChevronLeft className="w-4 h-4" /></button>
-                <div className="font-semibold text-slate-800">Week Commencing Monday: {formatDDMMYYYY(weekMonday)}</div>
-                <button onClick={() => shiftWeek(7)} className="p-2 border rounded hover:bg-slate-50"><ChevronRight className="w-4 h-4" /></button>
-              </div>
-              <div className="text-sm text-slate-500">
-                Logged in as <span className="font-semibold text-slate-800">{currentUser?.name}</span>
-              </div>
-            </div>
-
-            {/* Consultants On Leave This Week Banner */}
-            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <UserX className="w-4 h-4 text-rose-600" />
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">
-                    Consultants On Leave This Week ({currentWeekLeaves.length})
-                  </h3>
+            {/* Week Navigation Bar with Cycle Week Badge */}
+            <div className="flex flex-col md:flex-row items-center justify-between bg-white p-4 rounded-xl shadow-sm border border-slate-200 gap-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <button onClick={() => shiftWeek(-7)} className="p-2 border rounded hover:bg-slate-50" title="Previous Week">
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <div className="font-semibold text-slate-800">
+                  Week Commencing Monday: {formatDDMMYYYY(weekMonday)}
                 </div>
+                <button onClick={() => shiftWeek(7)} className="p-2 border rounded hover:bg-slate-50" title="Next Week">
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+
+                <span className="bg-indigo-100 text-indigo-800 text-xs font-bold px-2.5 py-1 rounded-full ml-1">
+                  Theatre Grid: Week {weekEndoSchedule.cycleWeek} (4-Wk Cycle)
+                </span>
+
+                {weekEndoClashCount > 0 ? (
+                  <span className="bg-rose-100 text-rose-800 text-xs font-bold px-2.5 py-1 rounded-full flex items-center gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    {weekEndoClashCount} Endo Leave {weekEndoClashCount === 1 ? 'Clash' : 'Clashes'}
+                  </span>
+                ) : (
+                  <span className="bg-emerald-100 text-emerald-800 text-xs font-semibold px-2.5 py-1 rounded-full flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    No Endo Leave Clashes
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 text-xs">
                 <button
-                  onClick={() => setActiveTab('leave_calendar')}
-                  className="text-xs text-blue-600 hover:underline font-medium"
+                  onClick={() => setWeekMonday('2026-11-02')}
+                  className="px-2.5 py-1 border border-slate-300 rounded hover:bg-slate-50 text-slate-600 font-medium"
                 >
-                  Open Full Leave Calendar →
+                  Jump to 2 Nov (W3)
+                </button>
+                <button
+                  onClick={() => setWeekMonday('2026-12-21')}
+                  className="px-2.5 py-1 border border-rose-200 bg-rose-50 rounded hover:bg-rose-100 text-rose-700 font-medium"
+                >
+                  Jump to Dec Xmas Leave
                 </button>
               </div>
-              {currentWeekLeaves.length === 0 ? (
-                <p className="text-xs text-slate-400 italic">No consultants recorded on leave for this week.</p>
-              ) : (
-                <div className="flex flex-wrap gap-2 pt-1">
-                  {currentWeekLeaves.map(lv => (
-                    <span
-                      key={lv.id}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-rose-200 bg-rose-50 text-xs text-rose-900"
-                    >
-                      <span className="font-semibold">{lv.staff_name}</span>
-                      <span className="text-[10px] bg-white px-1.5 py-0.5 rounded border border-rose-200 text-rose-700 font-medium">
-                        {lv.leave_type}
-                      </span>
-                      <span className="text-[10px] text-rose-600">
-                        ({formatDDMMYYYY(lv.start_date)}–{lv.end_date === 'TBC' ? 'TBC' : formatDDMMYYYY(lv.end_date)})
-                      </span>
-                    </span>
-                  ))}
-                </div>
-              )}
             </div>
 
+            {/* Endoscopy & Theatre Grid for Current Week */}
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-5 py-3.5 bg-slate-800 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Stethoscope className="w-4 h-4 text-teal-300" />
+                  <h2 className="font-bold text-sm">
+                    Endoscopy & Theatre Lists — Cycle Week {weekEndoSchedule.cycleWeek} ({formatDDMMYYYY(weekMonday)} – {formatDDMMYYYY(addDaysYMD(weekMonday, 4))})
+                  </h2>
+                </div>
+                <div className="flex items-center gap-3 text-xs">
+                  <span className="flex items-center gap-1 text-teal-200">
+                    <span className="w-2 h-2 rounded-full bg-teal-400"></span> ENDO (Fitzroy 1–3)
+                  </span>
+                  <span className="flex items-center gap-1 text-purple-200">
+                    <span className="w-2 h-2 rounded-full bg-purple-400"></span> Gas/Colon (Theatre 1 & 4)
+                  </span>
+                  <button
+                    onClick={() => setActiveTab('theatre')}
+                    className="text-amber-300 hover:underline font-medium"
+                  >
+                    Edit Master Grid →
+                  </button>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-slate-100 text-slate-700 border-b border-slate-200">
+                      <th className="p-2.5 w-32 border-r border-slate-200">Day / Date</th>
+                      <th className="p-2.5 w-14 border-r border-slate-200 text-center">AM/PM</th>
+                      {GASTRO_ROOMS.map(room => (
+                        <th key={room.key} className="p-2.5 border-r border-slate-200 last:border-r-0 min-w-[165px]">
+                          <div className="font-bold text-slate-800">{room.key}</div>
+                          <div className="text-[10px] text-slate-500 font-normal">
+                            {room.defaultType} • {room.site}
+                          </div>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {DAYS_OF_WEEK.map((day, dIdx) => {
+                      const dateStr = addDaysYMD(weekMonday, dIdx);
+                      return (
+                        <React.Fragment key={day}>
+                          {['AM', 'PM'].map((amPm, sIdx) => (
+                            <tr
+                              key={`${day}_${amPm}`}
+                              className={amPm === 'AM' ? 'bg-white' : 'bg-slate-50/60 border-b-2 border-slate-200'}
+                            >
+                              {sIdx === 0 && (
+                                <td
+                                  rowSpan={2}
+                                  className="p-2.5 font-bold text-slate-800 border-r border-slate-200 bg-slate-50/90 align-middle"
+                                >
+                                  <div>{day}</div>
+                                  <div className="text-[11px] font-normal text-slate-500">{formatDDMMYYYY(dateStr)}</div>
+                                </td>
+                              )}
+                              <td className="p-2 text-center font-bold border-r border-slate-200">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                                  amPm === 'AM' ? 'bg-sky-100 text-sky-800' : 'bg-amber-100 text-amber-800'
+                                }`}>
+                                  {amPm}
+                                </span>
+                              </td>
+                              {GASTRO_ROOMS.map(roomObj => {
+                                const sess = weekEndoSchedule.sessions.find(
+                                  s => s.day === day && s.session === amPm && s.room === roomObj.key
+                                );
+                                if (!sess) {
+                                  return (
+                                    <td key={roomObj.key} className="p-2 border-r border-slate-100 last:border-r-0 text-slate-300 italic text-center">
+                                      —
+                                    </td>
+                                  );
+                                }
+                                const isMe = currentUser && matchDoctorName(sess.staff_name, currentUser.name);
+                                const hasLeave = Boolean(sess.leaveClash);
+                                return (
+                                  <td
+                                    key={roomObj.key}
+                                    className={`p-2 border-r border-slate-100 last:border-r-0 align-top ${
+                                      hasLeave
+                                        ? 'bg-rose-50/90'
+                                        : isMe
+                                          ? 'bg-amber-50/80'
+                                          : ''
+                                    }`}
+                                  >
+                                    <div className="flex items-start justify-between gap-1">
+                                      <div>
+                                        <div className={`font-bold ${hasLeave ? 'line-through text-rose-700' : 'text-slate-900'}`}>
+                                          {sess.staff_name}
+                                        </div>
+                                        <div className="text-[10px] text-slate-500">
+                                          {sess.listType} • {sess.startTime}
+                                        </div>
+                                      </div>
+                                      <button
+                                        onClick={() => openCoverModal(sess)}
+                                        className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${
+                                          hasLeave
+                                            ? 'bg-rose-600 text-white hover:bg-rose-700'
+                                            : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
+                                        }`}
+                                      >
+                                        {hasLeave ? 'Cover' : 'Edit'}
+                                      </button>
+                                    </div>
+
+                                    {hasLeave && (
+                                      <div className="mt-1.5 p-1.5 rounded bg-rose-100/90 border border-rose-200 text-[10px] text-rose-900 space-y-0.5">
+                                        <div className="font-bold flex items-center gap-1">
+                                          <AlertTriangle className="w-3 h-3 text-rose-600 shrink-0" />
+                                          ON LEAVE ({sess.leaveClash.leave_type})
+                                        </div>
+                                        {sess.coverDoctor ? (
+                                          <div className="text-emerald-800 font-semibold bg-emerald-100 px-1.5 py-0.5 rounded">
+                                            ✓ Cover: {sess.coverDoctor}
+                                          </div>
+                                        ) : sess.coverStatus === 'cancelled' ? (
+                                          <div className="text-slate-700 font-semibold">List Cancelled</div>
+                                        ) : (
+                                          <div className="text-rose-700 font-semibold">⚠️ Needs Cover / Backfill</div>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {!hasLeave && sess.coverDoctor && (
+                                      <div className="mt-1 text-[10px] bg-blue-50 text-blue-800 px-1.5 py-0.5 rounded font-semibold">
+                                        Cover: {sess.coverDoctor}
+                                      </div>
+                                    )}
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          ))}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Department Ward, Oncall & Meeting Cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {['hm_oncall', 'ibd_wards', 'liver_wards', 'consults', 'gicc', 'friday_jc'].map(type => {
                 const entries = currentWeekEntries.filter(e => e.entry_type === type);
@@ -411,21 +714,24 @@ export default function App() {
                         <ul className="space-y-2 text-sm">
                           {entries.map(e => {
                             const isMe = currentUser && matchDoctorName(e.staff_name, currentUser.name);
-                            const doctorLeaves = getDoctorLeavesForRange(e.staff_name, leaveApplications, weekMonday, weekSunday);
-                            const onLeave = doctorLeaves.length > 0;
+                            const leaveHit = findDoctorLeaveOnDate(e.staff_name, e.date, null, leaveApplications);
                             return (
-                              <li key={e.id} className={`p-2 rounded border text-xs flex justify-between items-center ${
-                                onLeave ? 'bg-rose-50/70 border-rose-300' : isMe ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'
-                              }`}>
+                              <li
+                                key={e.id}
+                                className={`p-2 rounded border text-xs flex justify-between items-center ${
+                                  leaveHit
+                                    ? 'bg-rose-50 border-rose-300'
+                                    : isMe
+                                      ? 'bg-amber-50 border-amber-300'
+                                      : 'bg-slate-50 border-slate-200'
+                                }`}
+                              >
                                 <div>
-                                  <div className="font-semibold text-slate-900 flex flex-wrap items-center gap-1.5">
+                                  <div className="font-semibold text-slate-900 flex items-center gap-1.5 flex-wrap">
                                     <span>{e.staff_name}</span>
-                                    {onLeave && (
-                                      <span
-                                        className="text-[10px] bg-rose-600 text-white px-1.5 py-0.5 rounded font-bold inline-flex items-center gap-0.5"
-                                        title={`On Leave: ${doctorLeaves.map(l => `${l.leave_type} (${formatDDMMYYYY(l.start_date)} to ${l.end_date === 'TBC' ? 'TBC' : formatDDMMYYYY(l.end_date)})`).join(', ')}`}
-                                      >
-                                        <AlertTriangle className="w-2.5 h-2.5" /> ON LEAVE
+                                    {leaveHit && (
+                                      <span className="text-[10px] bg-rose-600 text-white px-1.5 py-0.5 rounded font-bold">
+                                        ON LEAVE
                                       </span>
                                     )}
                                   </div>
@@ -434,9 +740,11 @@ export default function App() {
                                 <button
                                   onClick={() => handleOpenSwapModal(e)}
                                   className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
-                                    isMe
-                                      ? 'bg-amber-600 hover:bg-amber-700 text-white'
-                                      : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
+                                    leaveHit
+                                      ? 'bg-rose-600 hover:bg-rose-700 text-white'
+                                      : isMe
+                                        ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                                        : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
                                   }`}
                                   title={isMe ? 'Swap your shift' : 'Initiate swap for this shift'}
                                 >
@@ -455,22 +763,24 @@ export default function App() {
           </section>
         )}
 
-        {/* TAB: WHO'S ON LEAVE (PUBLIC CONSULTANT LEAVE CALENDAR) */}
-        {activeTab === 'leave_calendar' && (
-          <LeaveCalendar
-            leaveApplications={leaveApplications}
+        {/* TAB 2: THEATRE GRID MASTER (WEEKS 1-4) */}
+        {activeTab === 'theatre' && (
+          <TheatreGridManager
+            theatreTemplates={theatreTemplates}
+            onSaveTemplates={async (next) => {
+              const saved = await api.saveTheatreTemplates(next);
+              setTheatreTemplates({ ...saved });
+            }}
+            onResetTemplates={async () => {
+              const def = await api.resetTheatreTemplates();
+              setTheatreTemplates({ ...def });
+            }}
             staffList={staffList}
             weekMonday={weekMonday}
-            onShiftWeek={shiftWeek}
-            onSetWeekMonday={setWeekMonday}
-            onAddLeave={handleAddLeaveRecord}
-            onUpdateLeave={handleUpdateLeaveRecord}
-            onDeleteLeave={handleDeleteLeaveRecord}
-            onBulkImportLeave={handleBulkImportLeave}
           />
         )}
 
-        {/* TAB 2: BULLETIN */}
+        {/* TAB 3: BULLETIN */}
         {activeTab === 'bulletin' && (
           <BulletinManager
             weekMonday={weekMonday}
@@ -479,7 +789,7 @@ export default function App() {
           />
         )}
 
-        {/* TAB 3: FULL ROSTER */}
+        {/* TAB 4: FULL ROSTER */}
         {activeTab === 'roster' && (
           <section className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
             <div className="flex flex-col sm:flex-row gap-3 items-center justify-between">
@@ -515,6 +825,7 @@ export default function App() {
                 <thead className="bg-slate-100 text-slate-700 sticky top-0 border-b">
                   <tr>
                     <th className="p-2.5">Date</th>
+                    <th className="p-2.5">Cycle Week</th>
                     <th className="p-2.5">Type</th>
                     <th className="p-2.5">Staff</th>
                     <th className="p-2.5">Role</th>
@@ -524,28 +835,20 @@ export default function App() {
                 <tbody className="divide-y divide-slate-100">
                   {filteredRoster.map(e => {
                     const isMe = currentUser && matchDoctorName(e.staff_name, currentUser.name);
-                    const shiftEnd = (() => {
-                      const d = new Date(`${e.date}T00:00:00`);
-                      d.setDate(d.getDate() + 6);
-                      return d.toISOString().slice(0, 10);
-                    })();
-                    const doctorLeaves = getDoctorLeavesForRange(e.staff_name, leaveApplications, e.date, shiftEnd);
-                    const onLeave = doctorLeaves.length > 0;
+                    const onLeave = findDoctorLeaveOnDate(e.staff_name, e.date, null, leaveApplications);
                     return (
-                      <tr key={e.id} className={onLeave ? 'bg-rose-50/50' : isMe ? 'bg-amber-50/60' : 'hover:bg-slate-50'}>
+                      <tr key={e.id} className={onLeave ? 'bg-rose-50/70' : isMe ? 'bg-amber-50/60' : 'hover:bg-slate-50'}>
                         <td className="p-2.5 font-medium">{formatDDMMYYYY(e.date)}</td>
+                        <td className="p-2.5">
+                          <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-semibold text-[10px]">
+                            Week {getCycleWeek(e.date)}
+                          </span>
+                        </td>
                         <td className="p-2.5 capitalize">{e.entry_type.replace('_', ' ')}</td>
                         <td className="p-2.5 font-semibold text-slate-900">
                           {e.staff_name}
                           {isMe && <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-normal ml-1">You</span>}
-                          {onLeave && (
-                            <span
-                              className="text-[10px] bg-rose-100 text-rose-800 border border-rose-200 px-1.5 py-0.5 rounded font-bold ml-1.5"
-                              title={doctorLeaves.map(l => `${l.leave_type}: ${formatDDMMYYYY(l.start_date)}–${l.end_date === 'TBC' ? 'TBC' : formatDDMMYYYY(l.end_date)}`).join(', ')}
-                            >
-                              ON LEAVE
-                            </span>
-                          )}
+                          {onLeave && <span className="text-[10px] bg-rose-600 text-white px-1.5 py-0.5 rounded font-bold ml-1">ON LEAVE</span>}
                         </td>
                         <td className="p-2.5 text-slate-500">{e.role_label || '-'}</td>
                         <td className="p-2.5">
@@ -565,12 +868,12 @@ export default function App() {
           </section>
         )}
 
-        {/* TAB 3: SHIFT SWAPS */}
+        {/* TAB 5: SHIFT SWAPS */}
         {activeTab === 'swaps' && (
           <section className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-6">
             <div>
               <h2 className="text-lg font-bold text-slate-800">Shift Swap Dashboard</h2>
-              <p className="text-xs text-slate-500">2-step verified swap workflow: Peer agreement $\rightarrow$ Coordinator sign-off.</p>
+              <p className="text-xs text-slate-500">2-step verified swap workflow: Peer agreement → Coordinator sign-off.</p>
             </div>
 
             {swaps.length === 0 ? (
@@ -578,8 +881,7 @@ export default function App() {
             ) : (
               <div className="space-y-3">
                 {swaps.map(s => {
-                  const isPeer = currentUser && s.peer_staff_name.toLowerCase().includes(currentUser.name.toLowerCase());
-                  const isRequester = currentUser && s.requester_staff_name.toLowerCase().includes(currentUser.name.toLowerCase());
+                  const isPeer = currentUser && matchDoctorName(s.peer_staff_name, currentUser.name);
                   return (
                     <div key={s.id} className="border rounded-lg p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-50">
                       <div>
@@ -619,34 +921,37 @@ export default function App() {
           </section>
         )}
 
-        {/* TAB 4: LEAVE APPLICATIONS */}
+        {/* TAB 6: LEAVE APPLICATIONS & ENDOSCOPY CLASH TRACKER */}
         {activeTab === 'leave' && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Form */}
-            <form onSubmit={submitLeaveApplication} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            {/* Left Column: Leave Form + Live Theatre & Roster Clash Detector (5 cols) */}
+            <form onSubmit={submitLeaveApplication} className="lg:col-span-5 bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4 self-start">
               <div>
                 <h2 className="text-lg font-bold text-slate-800">St Vincent's Leave Application</h2>
-                <p className="text-xs text-slate-500">Submits to database and automatically downloads ready-to-sign PDF.</p>
+                <p className="text-xs text-slate-500">
+                  Checks 4-week Theatre Grid (`ENDO` & `Gas/Colon`) and Department Roster for clashes, logs cover, and downloads official PDF.
+                </p>
               </div>
 
               {leaveSuccess && (
-                <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-300 rounded text-xs">
+                <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-300 rounded text-xs font-medium">
                   {leaveSuccess}
                 </div>
               )}
 
               <div className="grid grid-cols-2 gap-3 text-xs">
-                <div>
+                <div className="col-span-2 sm:col-span-1">
                   <label className="font-semibold block mb-1">Staff Name</label>
                   <input
                     type="text"
+                    list="gastro-staff-datalist"
                     value={leaveForm.staff_name}
                     onChange={(e) => setLeaveForm({ ...leaveForm, staff_name: e.target.value })}
                     className="w-full border p-2 rounded"
                     required
                   />
                 </div>
-                <div>
+                <div className="col-span-2 sm:col-span-1">
                   <label className="font-semibold block mb-1">Employee Number</label>
                   <input
                     type="text"
@@ -667,6 +972,8 @@ export default function App() {
                     <option>Conference / Study Leave</option>
                     <option>Sick / Carer's Leave</option>
                     <option>Long Service Leave</option>
+                    <option>Sabbatical</option>
+                    <option>Parental Leave</option>
                     <option>Leave Without Pay</option>
                   </select>
                 </div>
@@ -685,7 +992,7 @@ export default function App() {
                   <input
                     type="date"
                     value={leaveForm.start_date}
-                    onChange={(e) => setLeaveForm({ ...leaveForm, start_date: e.target.value })}
+                    onChange={(e) => setLeaveForm({ ...leaveForm, start_date: e.target.value, costing: '' })}
                     className="w-full border p-2 rounded"
                     required
                   />
@@ -695,9 +1002,100 @@ export default function App() {
                   <input
                     type="date"
                     value={leaveForm.end_date}
-                    onChange={(e) => setLeaveForm({ ...leaveForm, end_date: e.target.value })}
+                    onChange={(e) => setLeaveForm({ ...leaveForm, end_date: e.target.value, costing: '' })}
                     className="w-full border p-2 rounded"
                     required
+                  />
+                </div>
+
+                {/* Live Theatre & Roster Clash Detector Box */}
+                {leaveForm.start_date && (
+                  <div className="col-span-2 rounded-lg border p-3 space-y-2.5 bg-slate-50 border-slate-200">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                        <Stethoscope className="w-3.5 h-3.5 text-indigo-600" />
+                        Theatre Grid & Roster Alignment
+                      </span>
+                      {liveFormClashes.cycleWeeks.length > 0 && (
+                        <span className="bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-full font-bold text-[10px]">
+                          Cycle {liveFormClashes.cycleWeeks.map(w => `Week ${w}`).join(', ')}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Endoscopy Clashes */}
+                    {liveFormClashes.endoClashes.length > 0 ? (
+                      <div className="p-2.5 bg-rose-50 border border-rose-200 rounded space-y-1.5">
+                        <div className="font-bold text-rose-800 flex items-center gap-1">
+                          <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                          {liveFormClashes.endoClashes.length} Endoscopy / Theatre List {liveFormClashes.endoClashes.length === 1 ? 'Clash' : 'Clashes'} Detected:
+                        </div>
+                        <ul className="space-y-1 max-h-36 overflow-y-auto pr-1">
+                          {liveFormClashes.endoClashes.map((c, i) => (
+                            <li key={i} className="text-[11px] bg-white px-2 py-1 rounded border border-rose-200 flex items-center justify-between">
+                              <span>
+                                <strong className="text-slate-900">{c.day} {formatDDMMYYYY(c.date)} ({c.session})</strong> — {c.room} ({c.listType})
+                              </span>
+                              <span className="text-[10px] bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded font-semibold">
+                                Wk {c.cycleWeek}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : (
+                      <div className="p-2 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded flex items-center gap-1.5 font-medium">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        No Endoscopy (`ENDO` / `Gas/Colon`) lists affected during these dates.
+                      </div>
+                    )}
+
+                    {/* Department Roster Clashes */}
+                    {liveFormClashes.rosterClashes.length > 0 && (
+                      <div className="p-2.5 bg-amber-50 border border-amber-200 rounded space-y-1.5">
+                        <div className="font-bold text-amber-900">
+                          {liveFormClashes.rosterClashes.length} Department Roster {liveFormClashes.rosterClashes.length === 1 ? 'Duty' : 'Duties'} Affected:
+                        </div>
+                        <ul className="space-y-1">
+                          {liveFormClashes.rosterClashes.map(rc => (
+                            <li key={rc.id} className="text-[11px] bg-white px-2 py-1 rounded border border-amber-200 flex items-center justify-between">
+                              <span>
+                                <strong>{formatDDMMYYYY(rc.date)}</strong>: {rc.title} ({rc.role_label})
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenSwapModal(rc)}
+                                className="text-[10px] bg-amber-600 text-white px-1.5 py-0.5 rounded hover:bg-amber-700"
+                              >
+                                Swap
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div>
+                  <label className="font-semibold block mb-1">SITE (Endoscopy Use Only)</label>
+                  <input
+                    type="text"
+                    value={leaveForm.costing}
+                    onChange={(e) => setLeaveForm({ ...leaveForm, costing: e.target.value })}
+                    className="w-full border p-2 rounded"
+                    placeholder="Auto-filled on Endo clash"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold block mb-1">COVER (Endoscopy Use Only)</label>
+                  <input
+                    type="text"
+                    list="gastro-staff-datalist"
+                    value={leaveForm.allowances}
+                    onChange={(e) => setLeaveForm({ ...leaveForm, allowances: e.target.value })}
+                    className="w-full border p-2 rounded"
+                    placeholder="Covering doctor / Vacant"
                   />
                 </div>
                 <div className="col-span-2">
@@ -717,44 +1115,232 @@ export default function App() {
                 className="w-full bg-blue-700 hover:bg-blue-800 text-white font-medium py-2.5 rounded text-xs flex items-center justify-center gap-2"
               >
                 <Download className="w-4 h-4" />
-                {leaveSubmitting ? "Submitting..." : "Submit Application & Download Official PDF"}
+                {leaveSubmitting ? 'Submitting...' : 'Submit Leave & Download Official PDF'}
               </button>
             </form>
 
-            {/* List */}
-            <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-              <h3 className="font-bold text-slate-800 text-sm">Past Leave Applications</h3>
-              {leaveApplications.length === 0 ? (
-                <p className="text-xs text-slate-400 italic">No leave applications recorded yet.</p>
-              ) : (
-                <div className="space-y-3 max-h-[500px] overflow-y-auto">
-                  {leaveApplications.map(app => (
-                    <div key={app.id} className="border p-3 rounded text-xs flex items-center justify-between bg-slate-50">
-                      <div>
-                        <div className="font-bold text-slate-900">{app.staff_name} — {app.leave_type}</div>
-                        <div className="text-slate-500">{formatDDMMYYYY(app.start_date)} to {formatDDMMYYYY(app.end_date)} ({app.leave_hours || 'N/A'} hrs)</div>
-                      </div>
-                      <button
-                        onClick={() => generateLeavePdf(app)}
-                        className="flex items-center gap-1 text-blue-600 hover:text-blue-800 font-medium"
-                      >
-                        <Download className="w-3.5 h-3.5" /> PDF
-                      </button>
-                    </div>
+            {/* Right Column: Coordinator Leave & Endoscopy Clash Tracker (7 cols) */}
+            <div className="lg:col-span-7 bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b pb-3">
+                <div>
+                  <h3 className="font-bold text-slate-800 text-base">
+                    Leave & Endoscopy Clash Tracker
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Aligned with `SMS monthly leave update` & 4-Week Theatre Grid (`ENDO` / `Gas/Colon`).
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="cursor-pointer bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium px-2.5 py-1.5 rounded border border-slate-300 flex items-center gap-1">
+                    <Upload className="w-3.5 h-3.5" /> Import Leave CSV
+                    <input
+                      type="file"
+                      accept=".csv,.xlsx,.xls"
+                      onChange={handleLeaveCsvUpload}
+                      className="hidden"
+                    />
+                  </label>
+                  <button
+                    onClick={exportLeaveCsv}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium px-2.5 py-1.5 rounded flex items-center gap-1"
+                  >
+                    <Download className="w-3.5 h-3.5" /> Export CSV
+                  </button>
+                </div>
+              </div>
+
+              {/* Filter Bar */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { id: 'all', label: `All Leave (${enrichedLeaveList.length})` },
+                    {
+                      id: 'endo_clashes',
+                      label: `Endo Clashes (${enrichedLeaveList.filter(i => i.clashes.endoClashes.length > 0 || i.costing).length})`
+                    },
+                    {
+                      id: 'needs_cover',
+                      label: `Needs Endo Cover (${enrichedLeaveList.filter(i => (i.clashes.endoClashes.length > 0 || i.costing) && !i.allowances).length})`
+                    }
+                  ].map(tab => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setLeaveFilterMode(tab.id)}
+                      className={`px-2.5 py-1 rounded text-xs font-medium border ${
+                        leaveFilterMode === tab.id
+                          ? 'bg-blue-900 text-white border-blue-900'
+                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
                   ))}
+                </div>
+
+                <input
+                  type="text"
+                  placeholder="Search clinician..."
+                  value={leaveSearch}
+                  onChange={(e) => setLeaveSearch(e.target.value)}
+                  className="border px-2.5 py-1 rounded text-xs w-full sm:w-44"
+                />
+              </div>
+
+              {filteredLeaveList.length === 0 ? (
+                <p className="text-xs text-slate-400 italic py-6 text-center">No matching leave records found.</p>
+              ) : (
+                <div className="space-y-3 max-h-[640px] overflow-y-auto pr-1">
+                  {filteredLeaveList.map(app => {
+                    const endoList = app.clashes.endoClashes;
+                    const rosterList = app.clashes.rosterClashes;
+                    const hasEndo = endoList.length > 0 || Boolean(app.costing);
+                    return (
+                      <div
+                        key={app.id}
+                        className={`border p-3.5 rounded-lg text-xs space-y-2.5 ${
+                          hasEndo
+                            ? app.allowances
+                              ? 'bg-emerald-50/40 border-emerald-200'
+                              : 'bg-rose-50/40 border-rose-200'
+                            : 'bg-slate-50 border-slate-200'
+                        }`}
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-bold text-slate-900 text-sm">{app.staff_name}</span>
+                              <span className="bg-slate-200 text-slate-700 px-2 py-0.5 rounded text-[10px] font-semibold">
+                                {app.leave_type}
+                              </span>
+                              {app.clashes.cycleWeeks.length > 0 && (
+                                <span className="bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded text-[10px] font-bold">
+                                  Cycle {app.clashes.cycleWeeks.map(w => `W${w}`).join(', ')}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-slate-600 font-medium mt-0.5">
+                              {formatDDMMYYYY(app.start_date)} → {formatDDMMYYYY(app.end_date)}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 self-end sm:self-center">
+                            <button
+                              onClick={() => generateLeavePdf(app)}
+                              className="flex items-center gap-1 px-2 py-1 bg-white border border-slate-300 rounded text-blue-700 hover:bg-blue-50 font-medium"
+                              title="Download Official St Vincent's Leave PDF"
+                            >
+                              <Download className="w-3 h-3" /> PDF
+                            </button>
+                            <button
+                              onClick={() => handleDeleteLeave(app.id)}
+                              className="p-1 text-slate-400 hover:text-rose-600"
+                              title="Delete Leave Record"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Clashing Endoscopy Lists Summary */}
+                        {endoList.length > 0 && (
+                          <div className="bg-white/90 border border-rose-200 rounded p-2 space-y-1">
+                            <div className="font-bold text-rose-800 text-[11px] flex items-center justify-between">
+                              <span>
+                                ⚠️ {endoList.length} Scheduled Endoscopy {endoList.length === 1 ? 'Session' : 'Sessions'} During Leave:
+                              </span>
+                              {app.clashes.isTruncated && (
+                                <span className="text-[10px] font-normal text-slate-500">(Showing first 120 days)</span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {endoList.slice(0, 8).map((s, idx) => (
+                                <button
+                                  key={idx}
+                                  type="button"
+                                  onClick={() => {
+                                    setWeekMonday( addDaysYMD(s.date, -s.dayIndex) );
+                                    setActiveTab('weekly');
+                                  }}
+                                  className="text-[10px] bg-rose-100 hover:bg-rose-200 text-rose-900 px-2 py-0.5 rounded font-medium transition-colors"
+                                  title="Click to jump to this week on Weekly Schedule"
+                                >
+                                  {s.day.slice(0, 3)} {formatDDMMYYYY(s.date).slice(0, 5)} {s.session}: {s.room} (W{s.cycleWeek})
+                                </button>
+                              ))}
+                              {endoList.length > 8 && (
+                                <span className="text-[10px] text-slate-500 self-center">
+                                  +{endoList.length - 8} more sessions
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Clashing Roster Shifts Summary */}
+                        {rosterList.length > 0 && (
+                          <div className="bg-amber-50/90 border border-amber-200 rounded p-2">
+                            <div className="font-bold text-amber-900 text-[11px] mb-1">
+                              Roster Clashes ({rosterList.length}):
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {rosterList.slice(0, 6).map(r => (
+                                <span key={r.id} className="text-[10px] bg-white border border-amber-200 text-amber-900 px-2 py-0.5 rounded">
+                                  {formatDDMMYYYY(r.date).slice(0, 5)}: {r.title}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Editable SITE & COVER (Endoscopy Use Only) */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                          <div>
+                            <label className="text-[10px] uppercase font-bold text-slate-500 block mb-0.5">
+                              SITE (Endoscopy Use Only)
+                            </label>
+                            <input
+                              type="text"
+                              value={app.costing || ''}
+                              placeholder={endoList.length > 0 ? app.clashes.affectedSites.join(', ') : 'No Endo site clash'}
+                              onChange={(e) => handleUpdateLeaveField(app.id, 'costing', e.target.value)}
+                              className="w-full border border-slate-300 bg-white px-2 py-1 rounded text-xs"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] uppercase font-bold text-slate-500 block mb-0.5">
+                              COVER (Endoscopy Use Only)
+                            </label>
+                            <input
+                              type="text"
+                              list="gastro-staff-datalist"
+                              value={app.allowances || ''}
+                              placeholder={hasEndo ? 'Assign cover doctor / Vacant...' : '—'}
+                              onChange={(e) => handleUpdateLeaveField(app.id, 'allowances', e.target.value)}
+                              className={`w-full border px-2 py-1 rounded text-xs font-medium ${
+                                hasEndo && !app.allowances
+                                  ? 'border-rose-300 bg-rose-50/50 placeholder-rose-400'
+                                  : 'border-slate-300 bg-white'
+                              }`}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
           </div>
         )}
 
-        {/* TAB 5: ROSTER INGESTION */}
+        {/* TAB 7: ROSTER INGESTION */}
         {activeTab === 'upload' && (
           <section className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm max-w-xl mx-auto space-y-4 text-center">
             <Upload className="w-10 h-10 text-blue-600 mx-auto" />
             <h2 className="text-lg font-bold text-slate-800">In-Browser Excel Roster Uploader</h2>
             <p className="text-xs text-slate-500">
-              Drag-and-drop or select new schedule spreadsheets (SMS, GICC, Journal Club). Parsed client-side and committed directly to the database.
+              Drag-and-drop or select new schedule spreadsheets (SMS, GICC, Journal Club). For Hospital Theatre Grid CSVs, use the <strong>Theatre Grid (W1–W4)</strong> tab.
             </p>
 
             <div className="border-2 border-dashed border-slate-300 rounded-lg p-6 bg-slate-50 hover:bg-slate-100 transition-colors">
@@ -777,13 +1363,98 @@ export default function App() {
         )}
       </main>
 
+      {/* ENDOSCOPY COVER / BACKFILL MODAL */}
+      {coverModalSession && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-slate-800">Endoscopy List Cover / Status</h3>
+              <span className="bg-indigo-100 text-indigo-800 text-xs font-bold px-2 py-0.5 rounded">
+                Cycle Week {coverModalSession.cycleWeek}
+              </span>
+            </div>
+
+            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs space-y-1">
+              <div>
+                <span className="text-slate-500">Session:</span>{' '}
+                <strong className="text-slate-900">
+                  {coverModalSession.day} {formatDDMMYYYY(coverModalSession.date)} ({coverModalSession.session})
+                </strong>
+              </div>
+              <div>
+                <span className="text-slate-500">Room & Type:</span>{' '}
+                <strong className="text-slate-900">
+                  {coverModalSession.room} — {coverModalSession.listType} ({coverModalSession.site})
+                </strong>
+              </div>
+              <div>
+                <span className="text-slate-500">Scheduled Endoscopist:</span>{' '}
+                <strong className="text-slate-900">{coverModalSession.staff_name}</strong>
+              </div>
+              {coverModalSession.leaveClash && (
+                <div className="text-rose-700 font-semibold pt-1">
+                  ⚠️ On {coverModalSession.leaveClash.leave_type} ({formatDDMMYYYY(coverModalSession.leaveClash.start_date)} to {formatDDMMYYYY(coverModalSession.leaveClash.end_date)})
+                </div>
+              )}
+            </div>
+
+            <form onSubmit={handleSaveSessionCover} className="space-y-3 text-xs">
+              <div>
+                <label className="font-semibold block mb-1">Action / Status:</label>
+                <select
+                  value={coverStatusInput}
+                  onChange={(e) => setCoverStatusInput(e.target.value)}
+                  className="w-full border p-2 rounded bg-white"
+                >
+                  <option value="covered">Backfilled / Covered by Colleague</option>
+                  <option value="vacant">Theatre Vacant (Staffing Required)</option>
+                  <option value="cancelled">List Closed / Cancelled</option>
+                  <option value="scheduled">Reset to Normal Scheduled</option>
+                </select>
+              </div>
+
+              {coverStatusInput === 'covered' && (
+                <div>
+                  <label className="font-semibold block mb-1">Covering Endoscopist:</label>
+                  <input
+                    type="text"
+                    list="gastro-staff-datalist"
+                    value={coverStaffInput}
+                    onChange={(e) => setCoverStaffInput(e.target.value)}
+                    placeholder="Select or type covering doctor..."
+                    className="w-full border p-2 rounded"
+                    required
+                  />
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setCoverModalSession(null)}
+                  className="px-3 py-1.5 border rounded text-slate-600"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-1.5 bg-blue-600 text-white rounded font-medium hover:bg-blue-700"
+                >
+                  Save Cover
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* SWAP MODAL */}
       {swapModalOpen && selectedEntryToSwap && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4">
             <h3 className="font-bold text-slate-800">Request Shift Swap</h3>
             <p className="text-xs text-slate-500">
-              Shift: <span className="font-semibold text-slate-800">{selectedEntryToSwap.title}</span> on {selectedEntryToSwap.date}
+              Shift: <span className="font-semibold text-slate-800">{selectedEntryToSwap.title}</span> on {formatDDMMYYYY(selectedEntryToSwap.date)}
             </p>
 
             <form onSubmit={handleRequestSwap} className="space-y-3 text-xs">
@@ -859,9 +1530,9 @@ export default function App() {
                   if (pinInput === '1234') {
                     setPinVerified(true);
                     setShowPinModal(false);
-                    setStatusMsg("Coordinator PIN verified!");
+                    setStatusMsg('Coordinator PIN verified!');
                   } else {
-                    alert("Incorrect PIN");
+                    alert('Incorrect PIN');
                   }
                 }}
                 className="px-4 py-1.5 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700"
