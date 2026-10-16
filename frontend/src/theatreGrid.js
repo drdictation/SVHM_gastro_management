@@ -157,6 +157,17 @@ export function formatLocalYMD(d) {
   return `${y}-${m}-${day}`;
 }
 
+export function formatDDMMYYYY(dateInput) {
+  if (!dateInput) return "";
+  if (String(dateInput).toUpperCase() === "TBC") return "TBC";
+  const str = String(dateInput).slice(0, 10);
+  const parts = str.split("-");
+  if (parts.length === 3 && parts[0].length === 4) {
+    return `${parts[2]}/${parts[1]}/${parts[0]}`;
+  }
+  return str;
+}
+
 export function getMondayOfDate(dateStr) {
   const d = parseLocalYMD(dateStr);
   if (!d) return null;
@@ -238,19 +249,10 @@ export const WEEK_3_BASE_SESSIONS = [
   { day: "Friday", dayIndex: 4, session: "PM", startTime: "13:30", room: "THEATRE 1", listType: "Gas/Colon", site: "St George's / T1&T4", staff_name: "Dr Lauren Andersson", raw_doctor: "L Anderson" }
 ];
 
-export function createDefaultTheatreTemplates() {
-  const cloneSessions = (weekNum) =>
-    WEEK_3_BASE_SESSIONS.map((s, idx) => ({
-      ...s,
-      id: `w${weekNum}_${s.day.toLowerCase()}_${s.session.toLowerCase()}_${s.room.replace(/\s+/g, "").toLowerCase()}_${idx}`
-    }));
+import theatreGridWeeksData from "./theatre_grid_weeks.json";
 
-  return {
-    1: { weekNumber: 1, label: "Week 1", isDefaultFromWeek3: true, sourceFile: "Default (from Week 3 Grid)", sessions: cloneSessions(1) },
-    2: { weekNumber: 2, label: "Week 2", isDefaultFromWeek3: true, sourceFile: "Default (from Week 3 Grid)", sessions: cloneSessions(2) },
-    3: { weekNumber: 3, label: "Week 3 (2 Nov 2026)", isDefaultFromWeek3: false, sourceFile: "Theatre Grid 2026(Nov 2nd 2026).csv", sessions: cloneSessions(3) },
-    4: { weekNumber: 4, label: "Week 4", isDefaultFromWeek3: true, sourceFile: "Default (from Week 3 Grid)", sessions: cloneSessions(4) }
-  };
+export function createDefaultTheatreTemplates() {
+  return JSON.parse(JSON.stringify(theatreGridWeeksData));
 }
 
 // Parse Hospital Theatre Grid CSV or XLSX and extract ONLY "ENDO" (incl. ENDO 1-3) and "Gas/Colon" lists
