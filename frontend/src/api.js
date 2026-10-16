@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import initialSeed from './seed_data.json';
+import { createDefaultTheatreTemplates } from './theatreGrid';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -15,8 +16,11 @@ const LS_STAFF = 'svha_gastro_staff';
 const LS_ROSTER = 'svha_gastro_roster';
 const LS_SWAPS = 'svha_gastro_swaps';
 const LS_LEAVE = 'svha_gastro_leave';
+const LS_THEATRE_TEMPLATES = 'svha_gastro_theatre_templates_v1';
+const LS_ENDO_OVERRIDES = 'svha_gastro_endo_overrides_v1';
+const LS_LEAVE_SEED_VER = 'svha_gastro_leave_seed_v3_theatre';
 
-// Init local storage if empty
+// Init local storage if empty or if leave seed was updated from V2 Dec 26 CSV
 function initLocalStore() {
   if (!localStorage.getItem(LS_STAFF)) {
     localStorage.setItem(LS_STAFF, JSON.stringify(initialSeed.staff));
@@ -27,8 +31,18 @@ function initLocalStore() {
   if (!localStorage.getItem(LS_SWAPS)) {
     localStorage.setItem(LS_SWAPS, JSON.stringify([]));
   }
-  if (!localStorage.getItem(LS_LEAVE)) {
-    localStorage.setItem(LS_LEAVE, JSON.stringify([]));
+  if (!localStorage.getItem(LS_THEATRE_TEMPLATES)) {
+    localStorage.setItem(LS_THEATRE_TEMPLATES, JSON.stringify(createDefaultTheatreTemplates()));
+  }
+  if (!localStorage.getItem(LS_ENDO_OVERRIDES)) {
+    localStorage.setItem(LS_ENDO_OVERRIDES, JSON.stringify({}));
+  }
+  if (localStorage.getItem(LS_LEAVE_SEED_VER) !== '1') {
+    localStorage.setItem(LS_STAFF, JSON.stringify(initialSeed.staff));
+    localStorage.setItem(LS_LEAVE, JSON.stringify(initialSeed.leave || []));
+    localStorage.setItem(LS_LEAVE_SEED_VER, '1');
+  } else if (!localStorage.getItem(LS_LEAVE)) {
+    localStorage.setItem(LS_LEAVE, JSON.stringify(initialSeed.leave || []));
   }
 }
 initLocalStore();
@@ -54,7 +68,7 @@ export const api = {
 
   async bulkAddRoster(entries) {
     if (isSupabaseConfigured) {
-      const { data, error } = await supabase.from('roster_entries').insert(entries);
+      const { error } = await supabase.from('roster_entries').insert(entries);
       if (error) console.error("Supabase insert error", error);
     }
     const current = JSON.parse(localStorage.getItem(LS_ROSTER) || '[]');
@@ -116,8 +130,8 @@ export const api = {
   // Leave
   async getLeave() {
     if (isSupabaseConfigured) {
-      const { data, error } = await supabase.from('leave_applications').select('*').order('created_at', { ascending: false });
-      if (!error) return data;
+      const { data, error } = await supabase.from('leave_applications').select('*').order('start_date', { ascending: true });
+      if (!error && data?.length) return data;
     }
     return JSON.parse(localStorage.getItem(LS_LEAVE) || '[]');
   },
@@ -127,7 +141,7 @@ export const api = {
       ...form,
       id: Date.now(),
       created_at: new Date().toISOString(),
-      status: 'submitted'
+      status: form.status || 'approved'
     };
     if (isSupabaseConfigured) {
       const { data } = await supabase.from('leave_applications').insert([record]).select();
@@ -139,16 +153,51 @@ export const api = {
     return record;
   },
 
-  async updateLeaveStatus(id, status) {
+  async updateLeave(id, patch) {
     if (isSupabaseConfigured) {
-      await supabase.from('leave_applications').update({ status }).eq('id', id);
+      await supabase.from('leave_applications').update(patch).eq('id', id);
     }
     const current = JSON.parse(localStorage.getItem(LS_LEAVE) || '[]');
     const idx = current.findIndex(l => l.id === id);
     if (idx !== -1) {
-      current[idx].status = status;
+      current[idx] = { ...current[idx], ...patch };
       localStorage.setItem(LS_LEAVE, JSON.stringify(current));
+      return current[idx];
     }
+    return null;
+  },
+
+  async deleteLeave(id) {
+    if (isSupabaseConfigured) {
+      await supabase.from('leave_applications').delete().eq('id', id);
+    }
+    const current = JSON.parse(localStorage.getItem(LS_LEAVE) || '[]');
+    const next = current.filter(l => l.id !== id);
+    localStorage.setItem(LS_LEAVE, JSON.stringify(next));
+    return next;
+  },
+
+  async bulkImportLeave(records, mode = 'replace') {
+    const stamped = records.map((r, i) => ({
+      ...r,
+      id: r.id || Date.now() + i,
+      created_at: r.created_at || new Date().toISOString(),
+      status: r.status || 'approved'
+    }));
+    if (isSupabaseConfigured) {
+      if (mode === 'replace') {
+        await supabase.from('leave_applications').delete().neq('id', 0);
+      }
+      await supabase.from('leave_applications').insert(stamped);
+    }
+    const current = mode === 'replace' ? [] : JSON.parse(localStorage.getItem(LS_LEAVE) || '[]');
+    const next = [...current, ...stamped];
+    localStorage.setItem(LS_LEAVE, JSON.stringify(next));
+    return next;
+  },
+
+  async updateLeaveStatus(id, status) {
+    return this.updateLeave(id, { status });
   },
 
   // Bulletin
@@ -169,6 +218,59 @@ export const api = {
     const key = `svha_gastro_bulletin_${weekMonday}`;
     localStorage.setItem(key, JSON.stringify(bulletinData));
     return bulletinData;
+  },
+
+  // Theatre Grid Templates (Weeks 1-4)
+  async getTheatreTemplates() {
+    const saved = localStorage.getItem(LS_THEATRE_TEMPLATES);
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    const defaults = createDefaultTheatreTemplates();
+    localStorage.setItem(LS_THEATRE_TEMPLATES, JSON.stringify(defaults));
+    return defaults;
+  },
+
+  async saveTheatreTemplates(templates) {
+    localStorage.setItem(LS_THEATRE_TEMPLATES, JSON.stringify(templates));
+    return templates;
+  },
+
+  async resetTheatreTemplates() {
+    const defaults = createDefaultTheatreTemplates();
+    localStorage.setItem(LS_THEATRE_TEMPLATES, JSON.stringify(defaults));
+    return defaults;
+  },
+
+  // Endoscopy Per-Date Session Overrides (Cover / Vacant / Cancelled)
+  async getEndoOverrides() {
+    const saved = localStorage.getItem(LS_ENDO_OVERRIDES);
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    return {};
+  },
+
+  async saveEndoOverride(overrideKey, patch) {
+    const current = await this.getEndoOverrides();
+    if (!patch || (!patch.cover_staff_name && (!patch.status || patch.status === 'scheduled'))) {
+      delete current[overrideKey];
+    } else {
+      current[overrideKey] = {
+        ...(current[overrideKey] || {}),
+        ...patch,
+        updated_at: new Date().toISOString()
+      };
+    }
+    localStorage.setItem(LS_ENDO_OVERRIDES, JSON.stringify(current));
+    return current;
   }
 };
-

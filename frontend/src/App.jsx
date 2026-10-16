@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Calendar, RefreshCw, Mail, CheckCircle2, XCircle, ArrowRightLeft, 
-  User, Clock, ShieldCheck, Download, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, Upload, KeyRound
+  User, UserX, Clock, ShieldCheck, Download, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, Upload, KeyRound
 } from 'lucide-react';
 import { api, isSupabaseConfigured } from './api';
 import { generateLeavePdf } from './pdfGenerator';
 import { parseRosterFile } from './rosterParser';
 import BulletinManager from './BulletinManager';
+import LeaveCalendar, { doesLeaveOverlapRange, getDoctorLeavesForRange } from './LeaveCalendar';
 
 // Helper: Get Melbourne Date
 function getMelbourneDate() {
@@ -199,6 +200,44 @@ export default function App() {
     }
   };
 
+  // Leave Calendar CRUD handlers
+  const handleAddLeaveRecord = async (entry) => {
+    const record = await api.submitLeave(entry);
+    setLeaveApplications(prev => [record, ...prev]);
+    setStatusMsg(`Added leave for ${record.staff_name}`);
+    setTimeout(() => setStatusMsg(''), 4000);
+  };
+
+  const handleUpdateLeaveRecord = async (id, patch) => {
+    await api.updateLeave(id, patch);
+    setLeaveApplications(prev => prev.map(l => l.id === id ? { ...l, ...patch } : l));
+    setStatusMsg('Leave entry updated.');
+    setTimeout(() => setStatusMsg(''), 3000);
+  };
+
+  const handleDeleteLeaveRecord = async (id) => {
+    await api.deleteLeave(id);
+    setLeaveApplications(prev => prev.filter(l => l.id !== id));
+    setStatusMsg('Leave entry deleted.');
+    setTimeout(() => setStatusMsg(''), 3000);
+  };
+
+  const handleBulkImportLeave = async (records, mode) => {
+    const next = await api.bulkImportLeave(records, mode);
+    setLeaveApplications(next);
+  };
+
+  // Week Sunday helper for Weekly Schedule leave checks
+  const weekSunday = (() => {
+    const d = new Date(`${weekMonday}T00:00:00`);
+    d.setDate(d.getDate() + 6);
+    return d.toISOString().slice(0, 10);
+  })();
+
+  const currentWeekLeaves = leaveApplications.filter(l =>
+    doesLeaveOverlapRange(l, weekMonday, weekSunday)
+  );
+
   // Coordinator file upload
   const handleFileUpload = async (e) => {
     const file = e.target.files?.[0];
@@ -263,6 +302,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 flex border-t border-blue-800 overflow-x-auto">
           {[
             { id: 'weekly', label: 'Weekly Schedule', icon: Calendar },
+            { id: 'leave_calendar', label: `Who's On Leave (${leaveApplications.length})`, icon: UserX },
             { id: 'bulletin', label: 'Weekly Bulletin', icon: FileText },
             { id: 'roster', label: 'Full Roster', icon: Clock },
             { id: 'swaps', label: `Shift Swaps (${swaps.filter(s => s.status.startsWith('pending')).length})`, icon: ArrowRightLeft },
@@ -309,6 +349,44 @@ export default function App() {
               </div>
             </div>
 
+            {/* Consultants On Leave This Week Banner */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <UserX className="w-4 h-4 text-rose-600" />
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                    Consultants On Leave This Week ({currentWeekLeaves.length})
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setActiveTab('leave_calendar')}
+                  className="text-xs text-blue-600 hover:underline font-medium"
+                >
+                  Open Full Leave Calendar →
+                </button>
+              </div>
+              {currentWeekLeaves.length === 0 ? (
+                <p className="text-xs text-slate-400 italic">No consultants recorded on leave for this week.</p>
+              ) : (
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {currentWeekLeaves.map(lv => (
+                    <span
+                      key={lv.id}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-rose-200 bg-rose-50 text-xs text-rose-900"
+                    >
+                      <span className="font-semibold">{lv.staff_name}</span>
+                      <span className="text-[10px] bg-white px-1.5 py-0.5 rounded border border-rose-200 text-rose-700 font-medium">
+                        {lv.leave_type}
+                      </span>
+                      <span className="text-[10px] text-rose-600">
+                        ({formatDDMMYYYY(lv.start_date)}–{lv.end_date === 'TBC' ? 'TBC' : formatDDMMYYYY(lv.end_date)})
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {['hm_oncall', 'ibd_wards', 'liver_wards', 'consults', 'gicc', 'friday_jc'].map(type => {
                 const entries = currentWeekEntries.filter(e => e.entry_type === type);
@@ -333,10 +411,24 @@ export default function App() {
                         <ul className="space-y-2 text-sm">
                           {entries.map(e => {
                             const isMe = currentUser && matchDoctorName(e.staff_name, currentUser.name);
+                            const doctorLeaves = getDoctorLeavesForRange(e.staff_name, leaveApplications, weekMonday, weekSunday);
+                            const onLeave = doctorLeaves.length > 0;
                             return (
-                              <li key={e.id} className={`p-2 rounded border text-xs flex justify-between items-center ${isMe ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'}`}>
+                              <li key={e.id} className={`p-2 rounded border text-xs flex justify-between items-center ${
+                                onLeave ? 'bg-rose-50/70 border-rose-300' : isMe ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'
+                              }`}>
                                 <div>
-                                  <div className="font-semibold text-slate-900">{e.staff_name}</div>
+                                  <div className="font-semibold text-slate-900 flex flex-wrap items-center gap-1.5">
+                                    <span>{e.staff_name}</span>
+                                    {onLeave && (
+                                      <span
+                                        className="text-[10px] bg-rose-600 text-white px-1.5 py-0.5 rounded font-bold inline-flex items-center gap-0.5"
+                                        title={`On Leave: ${doctorLeaves.map(l => `${l.leave_type} (${formatDDMMYYYY(l.start_date)} to ${l.end_date === 'TBC' ? 'TBC' : formatDDMMYYYY(l.end_date)})`).join(', ')}`}
+                                      >
+                                        <AlertTriangle className="w-2.5 h-2.5" /> ON LEAVE
+                                      </span>
+                                    )}
+                                  </div>
                                   <div className="text-slate-500">{e.role_label || e.title}</div>
                                 </div>
                                 <button
@@ -361,6 +453,21 @@ export default function App() {
               })}
             </div>
           </section>
+        )}
+
+        {/* TAB: WHO'S ON LEAVE (PUBLIC CONSULTANT LEAVE CALENDAR) */}
+        {activeTab === 'leave_calendar' && (
+          <LeaveCalendar
+            leaveApplications={leaveApplications}
+            staffList={staffList}
+            weekMonday={weekMonday}
+            onShiftWeek={shiftWeek}
+            onSetWeekMonday={setWeekMonday}
+            onAddLeave={handleAddLeaveRecord}
+            onUpdateLeave={handleUpdateLeaveRecord}
+            onDeleteLeave={handleDeleteLeaveRecord}
+            onBulkImportLeave={handleBulkImportLeave}
+          />
         )}
 
         {/* TAB 2: BULLETIN */}
@@ -417,12 +524,28 @@ export default function App() {
                 <tbody className="divide-y divide-slate-100">
                   {filteredRoster.map(e => {
                     const isMe = currentUser && matchDoctorName(e.staff_name, currentUser.name);
+                    const shiftEnd = (() => {
+                      const d = new Date(`${e.date}T00:00:00`);
+                      d.setDate(d.getDate() + 6);
+                      return d.toISOString().slice(0, 10);
+                    })();
+                    const doctorLeaves = getDoctorLeavesForRange(e.staff_name, leaveApplications, e.date, shiftEnd);
+                    const onLeave = doctorLeaves.length > 0;
                     return (
-                      <tr key={e.id} className={isMe ? 'bg-amber-50/60' : 'hover:bg-slate-50'}>
+                      <tr key={e.id} className={onLeave ? 'bg-rose-50/50' : isMe ? 'bg-amber-50/60' : 'hover:bg-slate-50'}>
                         <td className="p-2.5 font-medium">{formatDDMMYYYY(e.date)}</td>
                         <td className="p-2.5 capitalize">{e.entry_type.replace('_', ' ')}</td>
                         <td className="p-2.5 font-semibold text-slate-900">
-                          {e.staff_name} {isMe && <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-normal ml-1">You</span>}
+                          {e.staff_name}
+                          {isMe && <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-normal ml-1">You</span>}
+                          {onLeave && (
+                            <span
+                              className="text-[10px] bg-rose-100 text-rose-800 border border-rose-200 px-1.5 py-0.5 rounded font-bold ml-1.5"
+                              title={doctorLeaves.map(l => `${l.leave_type}: ${formatDDMMYYYY(l.start_date)}–${l.end_date === 'TBC' ? 'TBC' : formatDDMMYYYY(l.end_date)}`).join(', ')}
+                            >
+                              ON LEAVE
+                            </span>
+                          )}
                         </td>
                         <td className="p-2.5 text-slate-500">{e.role_label || '-'}</td>
                         <td className="p-2.5">

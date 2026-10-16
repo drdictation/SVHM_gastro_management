@@ -459,11 +459,87 @@ def create_leave_application(app_data: LeaveApplicationCreate):
 def list_leave_applications(staff_name: Optional[str] = Query(None)):
     conn = get_db()
     if staff_name:
-        rows = conn.execute("SELECT * FROM leave_applications WHERE staff_name LIKE ? ORDER BY id DESC", (f"%{staff_name}%",)).fetchall()
+        rows = conn.execute("SELECT * FROM leave_applications WHERE staff_name LIKE ? ORDER BY start_date ASC, id ASC", (f"%{staff_name}%",)).fetchall()
     else:
-        rows = conn.execute("SELECT * FROM leave_applications ORDER BY id DESC").fetchall()
+        rows = conn.execute("SELECT * FROM leave_applications ORDER BY start_date ASC, id ASC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+class LeaveApplicationUpdate(BaseModel):
+    staff_name: Optional[str] = None
+    leave_type: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    costing: Optional[str] = None
+    allowances: Optional[str] = None
+    status: Optional[str] = None
+
+class LeaveBulkImport(BaseModel):
+    mode: str = "replace"  # 'replace' or 'merge'
+    records: List[dict]
+
+@app.put("/api/leave/{leave_id}")
+def update_leave_application(leave_id: int, patch: LeaveApplicationUpdate):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM leave_applications WHERE id = ?", (leave_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Leave application not found.")
+    updates = {k: v for k, v in patch.dict().items() if v is not None}
+    if updates:
+        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+        conn.execute(f"UPDATE leave_applications SET {set_clause} WHERE id = ?", (*updates.values(), leave_id))
+        conn.commit()
+    updated = dict(conn.execute("SELECT * FROM leave_applications WHERE id = ?", (leave_id,)).fetchone())
+    conn.close()
+    return updated
+
+@app.delete("/api/leave/{leave_id}")
+def delete_leave_application(leave_id: int):
+    conn = get_db()
+    conn.execute("DELETE FROM leave_applications WHERE id = ?", (leave_id,))
+    conn.commit()
+    conn.close()
+    return {"success": True, "deleted_id": leave_id}
+
+@app.post("/api/leave/bulk")
+def bulk_import_leave(payload: LeaveBulkImport):
+    conn = get_db()
+    cur = conn.cursor()
+    now = datetime.datetime.now().isoformat()
+    if payload.mode == "replace":
+        cur.execute("DELETE FROM leave_applications")
+    for r in payload.records:
+        cur.execute(
+            """
+            INSERT INTO leave_applications (
+                staff_name, employee_number, department, pay_in_advance,
+                leave_type, start_date, end_date, leave_hours, leave_balance,
+                costing, allowances, submission_date, status, manager_name, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                r.get("staff_name", ""),
+                r.get("employee_number", ""),
+                r.get("department", "Gastroenterology"),
+                r.get("pay_in_advance", "No"),
+                r.get("leave_type", "Annual Leave"),
+                r.get("start_date", ""),
+                r.get("end_date", ""),
+                r.get("leave_hours", ""),
+                r.get("leave_balance", ""),
+                r.get("costing", ""),
+                r.get("allowances", ""),
+                r.get("submission_date", datetime.date.today().isoformat()),
+                r.get("status", "approved"),
+                r.get("manager_name", "Prof. Alex Thompson"),
+                r.get("created_at", now)
+            )
+        )
+    conn.commit()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM leave_applications ORDER BY start_date ASC, id ASC").fetchall()]
+    conn.close()
+    return rows
 
 @app.get("/api/leave/{leave_id}/pdf")
 def download_leave_pdf(leave_id: int):
@@ -493,4 +569,5 @@ def preview_leave_pdf(app_data: LeaveApplicationCreate):
         media_type="application/pdf",
         headers={"Content-Disposition": 'inline; filename="Leave_Application_Preview.pdf"'}
     )
+
 
