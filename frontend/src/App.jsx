@@ -109,6 +109,7 @@ export default function App() {
   });
   const [leaveSubmitting, setLeaveSubmitting] = useState(false);
   const [leaveSuccess, setLeaveSuccess] = useState(null);
+  const [isTestMode, setIsTestMode] = useState(true); // Default to safe test mode (email only gastroenterologystvincents@gmail.com)
 
   // Uploader state
   const [uploadedCount, setUploadedCount] = useState(null);
@@ -195,6 +196,15 @@ export default function App() {
 
   // Live Email Recipients Preview
   const liveFormRecipients = useMemo(() => {
+    if (isTestMode) {
+      return [
+        {
+          label: 'Test Recipient (Gmail Only)',
+          email: 'gastroenterologystvincents@gmail.com',
+          trigger: '🧪 Test Mode Active (Hospital emails suppressed)'
+        }
+      ];
+    }
     const list = [];
     const matchedDoc = staffList.find(s => matchDoctorName(s.name, leaveForm.staff_name));
     const appEmail = (leaveForm.applicant_email || matchedDoc?.email || '').trim();
@@ -217,7 +227,7 @@ export default function App() {
       });
     }
     return list;
-  }, [leaveForm.applicant_email, leaveForm.staff_name, staffList, liveFormClashes.endoClashes, liveFormClinicClashes]);
+  }, [isTestMode, leaveForm.applicant_email, leaveForm.staff_name, staffList, liveFormClashes.endoClashes, liveFormClinicClashes]);
 
   // Auto-populate applicant email if staff changes and email is empty
   useEffect(() => {
@@ -369,18 +379,23 @@ export default function App() {
       const autoSites = liveFormClashes.affectedSites.join(', ');
       const matchedDoc = staffList.find(s => matchDoctorName(s.name, leaveForm.staff_name));
       const appEmail = (leaveForm.applicant_email || matchedDoc?.email || '').trim();
+      // 1. Download official hospital leave PDF directly onto the computer and get base64
+      const pdfResult = await generateLeavePdf({
+        ...leaveForm,
+        costing: leaveForm.costing || autoSites
+      });
+
       const payload = {
         ...leaveForm,
         applicant_email: appEmail,
         costing: leaveForm.costing || autoSites,
         endo_clashes: liveFormClashes.endoClashes,
-        clinic_clashes: liveFormClinicClashes
+        clinic_clashes: liveFormClinicClashes,
+        test_mode: isTestMode,
+        pdf_base64: pdfResult?.base64 || ''
       };
       const record = await api.submitLeave(payload);
       setLeaveApplications(prev => [record, ...prev]);
-
-      // 1. Download official hospital leave PDF directly onto the computer
-      await generateLeavePdf(record);
 
       // 2. Format recipient confirmation message
       const emailsList = record.email_recipients?.length > 0
@@ -389,15 +404,17 @@ export default function App() {
 
       if (record.email_dispatched) {
         setLeaveSuccess(
-          `Official hospital leave PDF downloaded onto your computer! Notification email dispatched from gastroenterologystvincents@gmail.com to: ${emailsList}`
+          isTestMode
+            ? `Official hospital leave PDF downloaded! TEST email dispatched strictly to: ${emailsList}`
+            : `Official hospital leave PDF downloaded! Notification email dispatched from gastroenterologystvincents@gmail.com to: ${emailsList}`
         );
       } else if (record.email_simulated) {
         setLeaveSuccess(
-          `Official hospital leave PDF downloaded onto your computer! Notification queued for: ${emailsList} (Gmail App Password pending setup in .env).`
+          `Official hospital leave PDF downloaded! Notification queued for: ${emailsList} (Gmail App Password pending setup in Vercel / .env).`
         );
       } else {
         setLeaveSuccess(
-          `Official hospital leave PDF downloaded onto your computer! Notification prepared for: ${emailsList}`
+          `Official hospital leave PDF downloaded! Notification prepared for: ${emailsList}`
         );
       }
     } catch (err) {
@@ -1129,6 +1146,24 @@ export default function App() {
                     className="w-full border p-2 rounded"
                   />
                 </div>
+              </div>
+
+              {/* Test Mode Safe Switch */}
+              <div className="p-2.5 rounded-lg border bg-amber-50/80 border-amber-300 space-y-1">
+                <label className="flex items-center gap-2 cursor-pointer font-bold text-amber-950 text-xs select-none">
+                  <input
+                    type="checkbox"
+                    checked={isTestMode}
+                    onChange={(e) => setIsTestMode(e.target.checked)}
+                    className="w-4 h-4 text-amber-600 rounded border-amber-300 focus:ring-amber-500"
+                  />
+                  <span>🧪 Test Mode (Safe): Email ONLY gastroenterologystvincents@gmail.com</span>
+                </label>
+                <p className="text-[10.5px] text-amber-800 pl-6 leading-tight">
+                  {isTestMode
+                    ? 'All official hospital recipients (Anne Savage, Endoscopy, Clinics) are suppressed. Safe to test!'
+                    : 'Live Mode: Official hospital recipients will receive actual notification emails upon submission.'}
+                </p>
               </div>
 
               <button

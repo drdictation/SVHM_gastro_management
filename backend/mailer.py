@@ -57,21 +57,26 @@ def build_leave_email(
     hours = leave_data.get("leave_hours", "")
     manager = leave_data.get("manager_name", "Prof. Alex Thompson")
     applicant_email = leave_data.get("applicant_email", "").strip()
+    is_test_mode = bool(leave_data.get("test_mode") or leave_data.get("test_only") or os.getenv("TEST_EMAIL_ONLY") == "true")
 
-    # Determine recipients
-    to_list: List[str] = []
-    if applicant_email:
-        to_list.append(applicant_email)
-    to_list.append(COORDINATOR_EMAIL)
-
-    cc_list: List[str] = []
     has_endo = bool(endo_clashes and len(endo_clashes) > 0)
     has_clinic = bool(clinic_clashes and len(clinic_clashes) > 0)
 
-    if has_endo:
-        cc_list.append(ENDOSCOPY_WAITINGLIST_EMAIL)
-    if has_clinic:
-        cc_list.append(CLINIC_COORDINATION_EMAIL)
+    # Determine recipients
+    to_list: List[str] = []
+    cc_list: List[str] = []
+
+    if is_test_mode:
+        to_list = [GMAIL_USER]
+        cc_list = []
+    else:
+        if applicant_email:
+            to_list.append(applicant_email)
+        to_list.append(COORDINATOR_EMAIL)
+        if has_endo:
+            cc_list.append(ENDOSCOPY_WAITINGLIST_EMAIL)
+        if has_clinic:
+            cc_list.append(CLINIC_COORDINATION_EMAIL)
 
     # Collect raw envelope recipients (deduplicated)
     all_envelope: List[str] = []
@@ -85,7 +90,8 @@ def build_leave_email(
     msg["To"] = ", ".join(to_list)
     if cc_list:
         msg["Cc"] = ", ".join(cc_list)
-    msg["Subject"] = f"Leave Application: {staff_name} ({start_date} to {end_date})"
+    prefix = "[TEST MODE - GMAIL ONLY] " if is_test_mode else ""
+    msg["Subject"] = f"{prefix}Leave Application: {staff_name} ({start_date} to {end_date})"
 
     # Plain text summary
     text_lines = [

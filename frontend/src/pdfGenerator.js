@@ -95,4 +95,13 @@ export async function generateLeavePdf(formData) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+
+  let binary = '';
+  const len = pdfBytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(pdfBytes[i]);
+  }
+  const base64 = btoa(binary);
+
+  return { pdfBytes, base64 };
 }

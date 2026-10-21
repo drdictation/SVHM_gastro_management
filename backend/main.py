@@ -350,6 +350,7 @@ class LeaveApplicationCreate(BaseModel):
     allowances: Optional[str] = ""
     submission_date: Optional[str] = ""
     manager_name: Optional[str] = ""
+    test_mode: Optional[bool] = False
     endo_clashes: Optional[List[dict]] = None
     clinic_clashes: Optional[List[dict]] = None
 
