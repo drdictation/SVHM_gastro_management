@@ -637,6 +637,11 @@ export default function App() {
           <ClinicManager
             staffList={staffList}
             currentUser={currentUser}
+            leaveApplications={leaveApplications}
+            theatreTemplates={theatreTemplates}
+            rosterEntries={rosterEntries}
+            endoOverrides={endoOverrides}
+            weekMonday={weekMonday}
           />
         )}
 

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Calendar, AlertTriangle, CheckCircle2, UserCheck, ShieldAlert, 
   Stethoscope, Clock, Filter, Search, ChevronLeft, ChevronRight,
-  UserX, RefreshCw, Layers, Award, Sparkles, Building2
+  UserX, RefreshCw, Layers, Award, Sparkles, Building2, Check, ExternalLink
 } from 'lucide-react';
 import { api } from './api';
 
@@ -20,7 +20,49 @@ const CLINIC_NAMES = [
   'HEPATOMA'
 ];
 
-export default function ClinicManager({ staffList, currentUser }) {
+function cleanDoctorName(name) {
+  if (!name) return '';
+  return String(name)
+    .toLowerCase()
+    .replace(/^(assoc\.?\s*prof\.?|prof\.?|dr\.?|mr\.?|ms\.?)\s*/i, '')
+    .replace(/[.]/g, '')
+    .trim();
+}
+
+function matchesDoctor(nameA, nameB) {
+  const a = cleanDoctorName(nameA);
+  const b = cleanDoctorName(nameB);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function getDoctorLeaveForDate(staffName, dateStr, leavesList) {
+  if (!staffName || !dateStr || !leavesList?.length) return null;
+  const target = cleanDoctorName(staffName);
+  if (!target) return null;
+
+  for (const lv of leavesList) {
+    if (!matchesDoctor(lv.staff_name, staffName)) continue;
+    const start = lv.start_date;
+    let end = lv.end_date || start;
+    if (end === 'TBC' || !end) end = '2099-12-31';
+
+    if (start <= dateStr && dateStr <= end) {
+      return lv;
+    }
+  }
+  return null;
+}
+
+export default function ClinicManager({ 
+  staffList = [], 
+  currentUser = null,
+  leaveApplications = [],
+  theatreTemplates = null,
+  rosterEntries = [],
+  endoOverrides = {},
+  weekMonday = ''
+}) {
   const [activeSubTab, setActiveSubTab] = useState('coordinator'); // 'coordinator' | 'grid' | 'leaves'
   const [coordinatorData, setCoordinatorData] = useState(null);
   const [clinicEntries, setClinicEntries] = useState([]);
@@ -41,7 +83,7 @@ export default function ClinicManager({ staffList, currentUser }) {
   const [coverNotes, setCoverNotes] = useState('');
   const [savingCover, setSavingCover] = useState(false);
 
-  // Load data
+  // Fetch base data
   const fetchData = async () => {
     try {
       setRefreshing(true);
@@ -67,6 +109,206 @@ export default function ClinicManager({ staffList, currentUser }) {
   useEffect(() => {
     fetchData();
   }, [searchDate, selectedClinic, selectedDoctor]);
+
+  // UNIFY LEAVES: Combine leaveApplications from "Leave and endo clashes" with coordinatorData leaves
+  const allUnifiedLeaves = useMemo(() => {
+    const list = [...(leaveApplications || [])];
+    const seen = new Set();
+    list.forEach(l => seen.add(`${cleanDoctorName(l.staff_name)}_${l.start_date}_${l.end_date}`));
+
+    if (coordinatorData?.leaves) {
+      for (const l of coordinatorData.leaves) {
+        const key = `${cleanDoctorName(l.staff_name)}_${l.start_date}_${l.end_date}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          list.push(l);
+        }
+      }
+    }
+    return list;
+  }, [leaveApplications, coordinatorData]);
+
+  // UNIFIED CLINIC SLOTS: Cross-reference every clinic slot with all active leaves
+  const synthesizedClinicSlots = useMemo(() => {
+    // Start with all slots known to be on leave from backend coordinator
+    const baseSlots = coordinatorData?.clinic_slots ? [...coordinatorData.clinic_slots] : [];
+    const baseMap = new Map();
+    baseSlots.forEach(s => baseMap.set(s.id, s));
+
+    // Also scan all clinic entries in current loaded window or seed to catch scheduled doctors on leave
+    for (const entry of clinicEntries) {
+      const activeLeave = getDoctorLeaveForDate(entry.staff_name, entry.date, allUnifiedLeaves);
+      if (activeLeave && entry.status !== 'off_routine' && entry.status !== 'holiday' && entry.status !== 'closed') {
+        if (!baseMap.has(entry.id)) {
+          const synthesized = {
+            ...entry,
+            status: 'on_leave',
+            leave_type: activeLeave.leave_type || 'Leave',
+            coverage_status: entry.covering_staff_name ? 'covered' : 'uncovered'
+          };
+          baseSlots.push(synthesized);
+          baseMap.set(entry.id, synthesized);
+        } else {
+          // Update leave type if missing
+          const existing = baseMap.get(entry.id);
+          if (!existing.leave_type) {
+            existing.leave_type = activeLeave.leave_type || 'Leave';
+          }
+        }
+      }
+    }
+
+    return baseSlots.sort((a, b) => a.date.localeCompare(b.date));
+  }, [coordinatorData, clinicEntries, allUnifiedLeaves]);
+
+  // UNIFIED THEATRE CONFLICTS: Combine backend theatre conflicts with leaveApplications
+  const synthesizedTheatreConflicts = useMemo(() => {
+    const list = coordinatorData?.theatre_conflicts ? [...coordinatorData.theatre_conflicts] : [];
+    // Ensure every theatre conflict has accurate leave details from allUnifiedLeaves
+    return list.map(t => {
+      const lv = getDoctorLeaveForDate(t.staff_name, t.date, allUnifiedLeaves);
+      return {
+        ...t,
+        leave_type: t.leave_type || lv?.leave_type || 'Leave'
+      };
+    });
+  }, [coordinatorData, allUnifiedLeaves]);
+
+  // UNIFIED GICC CONFLICTS: Cross-reference GICC entries with all leaves
+  const synthesizedGiccConflicts = useMemo(() => {
+    const conflicts = [];
+    const seen = new Set();
+
+    // Check roster entries for GICC commitments
+    for (const r of rosterEntries) {
+      if (r.entry_type === 'gicc') {
+        const lv = getDoctorLeaveForDate(r.staff_name, r.date, allUnifiedLeaves);
+        if (lv) {
+          const key = `gicc_${r.id}_${r.date}_${r.staff_name}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            conflicts.push({
+              ...r,
+              leave_type: lv.leave_type || 'Leave'
+            });
+          }
+        }
+      }
+    }
+
+    if (coordinatorData?.gicc_conflicts) {
+      for (const g of coordinatorData.gicc_conflicts) {
+        const key = `gicc_${g.id}_${g.date}_${g.staff_name}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          conflicts.push(g);
+        }
+      }
+    }
+    return conflicts.sort((a, b) => a.date.localeCompare(b.date));
+  }, [rosterEntries, coordinatorData, allUnifiedLeaves]);
+
+  // UNIFIED FRIDAY JOURNAL CLUB CONFLICTS: Cross-reference JC entries with all leaves
+  const synthesizedJcConflicts = useMemo(() => {
+    const conflicts = [];
+    const seen = new Set();
+
+    for (const r of rosterEntries) {
+      if (r.entry_type === 'friday_jc') {
+        const lv = getDoctorLeaveForDate(r.staff_name, r.date, allUnifiedLeaves);
+        if (lv) {
+          const key = `jc_${r.id}_${r.date}_${r.staff_name}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            conflicts.push({
+              ...r,
+              leave_type: lv.leave_type || 'Leave'
+            });
+          }
+        }
+      }
+    }
+
+    if (coordinatorData?.jc_conflicts) {
+      for (const j of coordinatorData.jc_conflicts) {
+        const key = `jc_${j.id}_${j.date}_${j.staff_name}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          conflicts.push(j);
+        }
+      }
+    }
+    return conflicts.sort((a, b) => a.date.localeCompare(b.date));
+  }, [rosterEntries, coordinatorData, allUnifiedLeaves]);
+
+  // SUMMARY COUNTS
+  const summary = useMemo(() => {
+    const uncoveredClinics = synthesizedClinicSlots.filter(s => s.coverage_status === 'uncovered').length;
+    const coveredClinics = synthesizedClinicSlots.filter(s => s.coverage_status === 'covered').length;
+    const uncoveredTheatre = synthesizedTheatreConflicts.filter(t => t.coverage_status !== 'covered').length;
+
+    return {
+      uncovered_clinics: uncoveredClinics,
+      covered_clinics: coveredClinics,
+      theatre_conflicts: synthesizedTheatreConflicts.length,
+      uncovered_theatre: uncoveredTheatre,
+      gicc_conflicts: synthesizedGiccConflicts.length,
+      jc_conflicts: synthesizedJcConflicts.length,
+      ward_oncall_conflicts: coordinatorData?.summary?.ward_oncall_conflicts || 0,
+      approved_leaves_count: allUnifiedLeaves.length
+    };
+  }, [synthesizedClinicSlots, synthesizedTheatreConflicts, synthesizedGiccConflicts, synthesizedJcConflicts, coordinatorData, allUnifiedLeaves]);
+
+  // Filtered lists for coordinator view search
+  const filteredClinicSlots = useMemo(() => {
+    return synthesizedClinicSlots.filter(s => {
+      const q = coordinatorSearch.toLowerCase();
+      if (!q) return true;
+      return (
+        s.staff_name?.toLowerCase().includes(q) ||
+        s.clinic_name?.toLowerCase().includes(q) ||
+        s.date?.includes(q) ||
+        s.leave_type?.toLowerCase().includes(q) ||
+        s.covering_staff_name?.toLowerCase().includes(q)
+      );
+    });
+  }, [synthesizedClinicSlots, coordinatorSearch]);
+
+  const filteredTheatreConflicts = useMemo(() => {
+    return synthesizedTheatreConflicts.filter(t => {
+      const q = coordinatorSearch.toLowerCase();
+      if (!q) return true;
+      return (
+        t.staff_name?.toLowerCase().includes(q) ||
+        t.room_name?.toLowerCase().includes(q) ||
+        t.date?.includes(q) ||
+        t.leave_type?.toLowerCase().includes(q) ||
+        t.covering_staff_name?.toLowerCase().includes(q)
+      );
+    });
+  }, [synthesizedTheatreConflicts, coordinatorSearch]);
+
+  // Filtered clinic entries for grid view
+  const filteredGridEntries = useMemo(() => {
+    return clinicEntries.map(entry => {
+      const activeLeave = getDoctorLeaveForDate(entry.staff_name, entry.date, allUnifiedLeaves);
+      if (activeLeave && entry.status !== 'off_routine' && entry.status !== 'holiday' && entry.status !== 'closed') {
+        return {
+          ...entry,
+          status: 'on_leave',
+          leave_type: entry.leave_type || activeLeave.leave_type || 'Leave',
+          coverage_status: entry.covering_staff_name ? 'covered' : 'uncovered'
+        };
+      }
+      return entry;
+    }).filter(e => {
+      if (selectedStatus === 'uncovered' && e.coverage_status !== 'uncovered') return false;
+      if (selectedStatus === 'covered' && e.coverage_status !== 'covered') return false;
+      if (selectedStatus === 'attending' && e.status !== 'attending') return false;
+      if (selectedStatus === 'off_routine' && e.status !== 'off_routine') return false;
+      return true;
+    });
+  }, [clinicEntries, selectedStatus, allUnifiedLeaves]);
 
   const handleOpenCoverModal = (type, item) => {
     setActiveCoverItem({ type, item });
@@ -96,101 +338,6 @@ export default function ClinicManager({ staffList, currentUser }) {
     }
   };
 
-  const summary = coordinatorData?.summary || {
-    uncovered_clinics: 0,
-    covered_clinics: 0,
-    theatre_conflicts: 0,
-    uncovered_theatre: 0,
-    gicc_conflicts: 0,
-    jc_conflicts: 0,
-    ward_oncall_conflicts: 0,
-    approved_leaves_count: 0
-  };
-
-  // Filtered lists for coordinator view
-  const filteredClinicSlots = useMemo(() => {
-    if (!coordinatorData?.clinic_slots) return [];
-    return coordinatorData.clinic_slots.filter(s => {
-      const q = coordinatorSearch.toLowerCase();
-      if (!q) return true;
-      return (
-        s.staff_name?.toLowerCase().includes(q) ||
-        s.clinic_name?.toLowerCase().includes(q) ||
-        s.date?.includes(q) ||
-        s.leave_type?.toLowerCase().includes(q) ||
-        s.covering_staff_name?.toLowerCase().includes(q)
-      );
-    });
-  }, [coordinatorData, coordinatorSearch]);
-
-  const filteredTheatreConflicts = useMemo(() => {
-    if (!coordinatorData?.theatre_conflicts) return [];
-    return coordinatorData.theatre_conflicts.filter(t => {
-      const q = coordinatorSearch.toLowerCase();
-      if (!q) return true;
-      return (
-        t.staff_name?.toLowerCase().includes(q) ||
-        t.room_name?.toLowerCase().includes(q) ||
-        t.date?.includes(q) ||
-        t.leave_type?.toLowerCase().includes(q) ||
-        t.covering_staff_name?.toLowerCase().includes(q)
-      );
-    });
-  }, [coordinatorData, coordinatorSearch]);
-
-  const filteredGiccConflicts = useMemo(() => {
-    if (!coordinatorData?.gicc_conflicts) return [];
-    return coordinatorData.gicc_conflicts.filter(g => {
-      const q = coordinatorSearch.toLowerCase();
-      if (!q) return true;
-      return (
-        g.staff_name?.toLowerCase().includes(q) ||
-        g.title?.toLowerCase().includes(q) ||
-        g.date?.includes(q) ||
-        g.leave_type?.toLowerCase().includes(q)
-      );
-    });
-  }, [coordinatorData, coordinatorSearch]);
-
-  const filteredJcConflicts = useMemo(() => {
-    if (!coordinatorData?.jc_conflicts) return [];
-    return coordinatorData.jc_conflicts.filter(j => {
-      const q = coordinatorSearch.toLowerCase();
-      if (!q) return true;
-      return (
-        j.staff_name?.toLowerCase().includes(q) ||
-        j.title?.toLowerCase().includes(q) ||
-        j.date?.includes(q) ||
-        j.leave_type?.toLowerCase().includes(q)
-      );
-    });
-  }, [coordinatorData, coordinatorSearch]);
-
-  const filteredWardConflicts = useMemo(() => {
-    if (!coordinatorData?.ward_conflicts) return [];
-    return coordinatorData.ward_conflicts.filter(w => {
-      const q = coordinatorSearch.toLowerCase();
-      if (!q) return true;
-      return (
-        w.staff_name?.toLowerCase().includes(q) ||
-        w.title?.toLowerCase().includes(q) ||
-        w.date?.includes(q) ||
-        w.leave_type?.toLowerCase().includes(q)
-      );
-    });
-  }, [coordinatorData, coordinatorSearch]);
-
-  // Filtered clinic entries for grid view
-  const filteredGridEntries = useMemo(() => {
-    return clinicEntries.filter(e => {
-      if (selectedStatus === 'uncovered' && e.coverage_status !== 'uncovered') return false;
-      if (selectedStatus === 'covered' && e.coverage_status !== 'covered') return false;
-      if (selectedStatus === 'attending' && e.status !== 'attending') return false;
-      if (selectedStatus === 'off_routine' && e.status !== 'off_routine') return false;
-      return true;
-    });
-  }, [clinicEntries, selectedStatus]);
-
   return (
     <div className="space-y-6">
       {/* Top Banner & Title */}
@@ -204,11 +351,15 @@ export default function ClinicManager({ staffList, currentUser }) {
               <h2 className="text-xl font-bold text-slate-900">Clinic Roster & Leave Coordinator</h2>
             </div>
             <p className="text-sm text-slate-500 mt-1">
-              Cross-referencing leave impacts across Gastroenterology clinics, Endoscopy lists, GICC Grand Rounds, and Journal Club
+              Synchronized with <span className="font-semibold text-slate-700">Leave and endo clashes</span> register to flag all missed clinics, endoscopy sessions, GICC commitments, and Journal Club presentations
             </p>
           </div>
 
           <div className="flex items-center gap-2">
+            <span className="text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 px-3 py-1.5 rounded-lg font-medium flex items-center gap-1.5">
+              <Check className="w-3.5 h-3.5" />
+              Synced with Leave Register ({allUnifiedLeaves.length} active leaves)
+            </span>
             <button
               onClick={fetchData}
               disabled={refreshing}
@@ -255,7 +406,7 @@ export default function ClinicManager({ staffList, currentUser }) {
               <span className="text-2xl font-bold text-blue-900">{summary.gicc_conflicts}</span>
               <span className="text-xs text-blue-700">commitments</span>
             </div>
-            <span className="text-[11px] text-blue-600 mt-0.5 block">Chair / Speaker checks</span>
+            <span className="text-[11px] text-blue-600 mt-0.5 block">Chair / Speaker conflicts</span>
           </div>
 
           <div className="bg-purple-50/70 border border-purple-200 rounded-xl p-3.5">
@@ -279,7 +430,7 @@ export default function ClinicManager({ staffList, currentUser }) {
               <span className="text-2xl font-bold text-emerald-900">{summary.approved_leaves_count}</span>
               <span className="text-xs text-emerald-700">records</span>
             </div>
-            <span className="text-[11px] text-emerald-600 mt-0.5 block">Unified Dept Calendar</span>
+            <span className="text-[11px] text-emerald-600 mt-0.5 block">Cross-department sync</span>
           </div>
         </div>
 
@@ -323,7 +474,7 @@ export default function ClinicManager({ staffList, currentUser }) {
             }`}
           >
             <Calendar className="w-4 h-4" />
-            Staff Leave Register
+            Staff Leave Register ({allUnifiedLeaves.length})
           </button>
         </div>
       </div>
@@ -344,7 +495,7 @@ export default function ClinicManager({ staffList, currentUser }) {
               />
             </div>
             <div className="text-xs text-slate-500">
-              Showing cross-department coverage requirements
+              Showing active coverage requirements across all department commitments
             </div>
           </div>
 
@@ -358,19 +509,19 @@ export default function ClinicManager({ staffList, currentUser }) {
                   {filteredClinicSlots.length} slots
                 </span>
               </div>
-              <span className="text-xs text-amber-800">
-                Scheduled doctor on leave during clinic session
+              <span className="text-xs text-amber-800 font-medium">
+                Scheduled doctor on approved leave during clinic session
               </span>
             </div>
 
-            <div className="overflow-x-auto max-h-[380px] overflow-y-auto">
+            <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
               <table className="w-full text-left text-sm">
                 <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0 z-10 text-xs">
                   <tr>
                     <th className="py-2.5 px-4 font-semibold">Date / Day</th>
                     <th className="py-2.5 px-4 font-semibold">Clinic</th>
                     <th className="py-2.5 px-4 font-semibold">Scheduled Doctor</th>
-                    <th className="py-2.5 px-4 font-semibold">Leave Type</th>
+                    <th className="py-2.5 px-4 font-semibold">Leave Type (from Leave Register)</th>
                     <th className="py-2.5 px-4 font-semibold">Coverage Status</th>
                     <th className="py-2.5 px-4 font-semibold">Covering Doctor</th>
                     <th className="py-2.5 px-4 font-semibold text-right">Action</th>
@@ -397,7 +548,7 @@ export default function ClinicManager({ staffList, currentUser }) {
                         </td>
                         <td className="py-2.5 px-4">
                           <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-rose-100 text-rose-800">
-                            {slot.leave_type || 'Leave'}
+                            {slot.leave_type || 'Approved Leave'}
                           </span>
                         </td>
                         <td className="py-2.5 px-4">
@@ -444,7 +595,7 @@ export default function ClinicManager({ staffList, currentUser }) {
                   {filteredTheatreConflicts.length} sessions
                 </span>
               </div>
-              <span className="text-xs text-rose-800">
+              <span className="text-xs text-rose-800 font-medium">
                 Endoscopist on approved leave on theatre date
               </span>
             </div>
@@ -535,18 +686,18 @@ export default function ClinicManager({ staffList, currentUser }) {
                   <Award className="w-5 h-5 text-blue-600" />
                   <h3 className="font-bold text-slate-900">GICC Grand Rounds Affected</h3>
                   <span className="text-xs px-2 py-0.5 bg-blue-200 text-blue-900 font-semibold rounded-full">
-                    {filteredGiccConflicts.length}
+                    {synthesizedGiccConflicts.length}
                   </span>
                 </div>
                 <span className="text-xs text-blue-700">Mondays 12:30pm</span>
               </div>
               <div className="p-4 divide-y divide-slate-100 max-h-[300px] overflow-y-auto">
-                {filteredGiccConflicts.length === 0 ? (
+                {synthesizedGiccConflicts.length === 0 ? (
                   <div className="py-6 text-center text-slate-400 text-sm">
                     No GICC chair/speaker commitments coincide with approved leave.
                   </div>
                 ) : (
-                  filteredGiccConflicts.map(gc => (
+                  synthesizedGiccConflicts.map(gc => (
                     <div key={gc.id} className="py-2.5 flex items-center justify-between text-sm">
                       <div>
                         <div className="font-bold text-slate-900">{gc.date} — {gc.role_label || 'Role'}</div>
@@ -568,18 +719,18 @@ export default function ClinicManager({ staffList, currentUser }) {
                   <Clock className="w-5 h-5 text-purple-600" />
                   <h3 className="font-bold text-slate-900">Friday Journal Club Affected</h3>
                   <span className="text-xs px-2 py-0.5 bg-purple-200 text-purple-900 font-semibold rounded-full">
-                    {filteredJcConflicts.length}
+                    {synthesizedJcConflicts.length}
                   </span>
                 </div>
                 <span className="text-xs text-purple-700">Fridays 8:00am</span>
               </div>
               <div className="p-4 divide-y divide-slate-100 max-h-[300px] overflow-y-auto">
-                {filteredJcConflicts.length === 0 ? (
+                {synthesizedJcConflicts.length === 0 ? (
                   <div className="py-6 text-center text-slate-400 text-sm">
                     No Friday JC presenter commitments coincide with approved leave.
                   </div>
                 ) : (
-                  filteredJcConflicts.map(jc => (
+                  synthesizedJcConflicts.map(jc => (
                     <div key={jc.id} className="py-2.5 flex items-center justify-between text-sm">
                       <div>
                         <div className="font-bold text-slate-900">{jc.date} — Presenter</div>
@@ -594,33 +745,6 @@ export default function ClinicManager({ staffList, currentUser }) {
               </div>
             </div>
           </div>
-
-          {/* Oncall & Ward Service Conflicts during leave */}
-          {filteredWardConflicts.length > 0 && (
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <ShieldAlert className="w-5 h-5 text-amber-600" />
-                  <h3 className="font-bold text-slate-900">Acute H&M Oncall & Ward Service During Leave</h3>
-                  <span className="text-xs px-2 py-0.5 bg-amber-200 text-amber-900 font-semibold rounded-full">
-                    {filteredWardConflicts.length}
-                  </span>
-                </div>
-              </div>
-              <div className="divide-y divide-slate-100 max-h-[250px] overflow-y-auto p-2">
-                {filteredWardConflicts.map(w => (
-                  <div key={w.id} className="p-2.5 flex items-center justify-between text-sm">
-                    <div>
-                      <span className="font-bold text-slate-900">{w.date}</span> — <span className="text-indigo-700 font-semibold">{w.title}</span> ({w.staff_name})
-                    </div>
-                    <span className="px-2 py-0.5 text-xs font-semibold rounded bg-rose-100 text-rose-800">
-                      {w.leave_type || 'On Leave'}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -682,7 +806,7 @@ export default function ClinicManager({ staffList, currentUser }) {
             </div>
 
             <div className="ml-auto text-xs text-slate-500">
-              Showing {filteredGridEntries.length} clinic records
+              Showing {filteredGridEntries.length} clinic records for {searchDate}
             </div>
           </div>
 
@@ -733,7 +857,7 @@ export default function ClinicManager({ staffList, currentUser }) {
                           <td className="py-2 px-4">
                             {isLeave && (
                               <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-rose-100 text-rose-800">
-                                {entry.leave_type || 'Leave'}
+                                {entry.leave_type || 'Approved Leave'}
                               </span>
                             )}
                             {isHoliday && (
@@ -798,11 +922,11 @@ export default function ClinicManager({ staffList, currentUser }) {
             <div>
               <h3 className="font-bold text-slate-900">Department Leave Register</h3>
               <p className="text-xs text-slate-500">
-                Synthesized from SMS monthly updates, clinic leave rosters, and submitted leave applications
+                Synchronized across "Leave and endo clashes", monthly updates, and submitted leave forms
               </p>
             </div>
             <span className="text-xs px-2.5 py-1 bg-indigo-100 text-indigo-800 font-bold rounded-full">
-              {coordinatorData?.leaves?.length || 0} approved records
+              {allUnifiedLeaves.length} active leave records
             </span>
           </div>
 
@@ -815,18 +939,18 @@ export default function ClinicManager({ staffList, currentUser }) {
                   <th className="py-2.5 px-4">Start Date</th>
                   <th className="py-2.5 px-4">End Date</th>
                   <th className="py-2.5 px-4">Status</th>
-                  <th className="py-2.5 px-4">Department / Manager</th>
+                  <th className="py-2.5 px-4">Department / Notes</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {(!coordinatorData?.leaves || coordinatorData.leaves.length === 0) ? (
+                {allUnifiedLeaves.length === 0 ? (
                   <tr>
                     <td colSpan="6" className="py-8 text-center text-slate-400">
-                      No approved leave records found.
+                      No active leave records found.
                     </td>
                   </tr>
                 ) : (
-                  coordinatorData.leaves.map((l, idx) => (
+                  allUnifiedLeaves.map((l, idx) => (
                     <tr key={idx} className="hover:bg-slate-50/60 transition">
                       <td className="py-2.5 px-4 font-bold text-slate-900">
                         {l.staff_name}
@@ -848,7 +972,7 @@ export default function ClinicManager({ staffList, currentUser }) {
                         </span>
                       </td>
                       <td className="py-2.5 px-4 text-xs text-slate-500">
-                        {l.manager_name || 'Department Coordinator'}
+                        {l.manager_name || l.notes || 'Department Coordinator'}
                       </td>
                     </tr>
                   ))

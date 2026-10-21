@@ -734,14 +734,27 @@ def get_leave_coverage_coordinator(
             "source": "clinic_sheet"
         })
 
+    import re
+    def norm_doc_name(name):
+        if not name:
+            return ""
+        return re.sub(r'^(assoc\.?\s*prof\.?|prof\.?|dr\.?|mr\.?|ms\.?)\s*', '', str(name).strip(), flags=re.I).lower().replace('.', '').strip()
+
+    def matches_doc(a, b):
+        na = norm_doc_name(a)
+        nb = norm_doc_name(b)
+        if not na or not nb:
+            return False
+        return na == nb or na in nb or nb in na
+
     def is_on_leave(name, check_date):
         for li in leave_intervals:
-            if li["staff_name"] == name and li["start_date"] <= check_date <= li["end_date"]:
+            if matches_doc(li["staff_name"], name) and li["start_date"] <= check_date <= li["end_date"]:
                 return li
         return None
 
-    # 2. Uncovered Clinics
-    clinic_query = "SELECT * FROM clinic_roster WHERE status = 'on_leave'"
+    # 2. Uncovered Clinics (explicitly tagged on leave + scheduled doctors who are on approved leave)
+    clinic_query = "SELECT * FROM clinic_roster WHERE status IN ('on_leave', 'attending')"
     clinic_params = []
     if start_date:
         clinic_query += " AND date >= ?"
@@ -750,7 +763,21 @@ def get_leave_coverage_coordinator(
         clinic_query += " AND date <= ?"
         clinic_params.append(end_date)
     clinic_query += " ORDER BY date ASC, clinic_name ASC"
-    clinic_slots = [dict(r) for r in conn.execute(clinic_query, clinic_params).fetchall()]
+    
+    clinic_slots = []
+    for r in conn.execute(clinic_query, clinic_params).fetchall():
+        row = dict(r)
+        l_info = is_on_leave(row.get("staff_name"), row.get("date"))
+        if row.get("status") == "on_leave":
+            if l_info and not row.get("leave_type"):
+                row["leave_type"] = l_info["leave_type"]
+            clinic_slots.append(row)
+        elif l_info:
+            # Scheduled to attend, but on leave from leave applications!
+            row["status"] = "on_leave"
+            row["leave_type"] = l_info["leave_type"]
+            row["coverage_status"] = "covered" if row.get("covering_staff_name") else "uncovered"
+            clinic_slots.append(row)
 
     # 3. Theatre Grid Endoscopy conflicts
     theatre_query = "SELECT * FROM theatre_grid_entries WHERE 1=1"

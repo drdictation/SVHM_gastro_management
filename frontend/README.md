@@ -1,16 +1,37 @@
-# React + Vite
+# Frontend (React 19 + Vite 8 + Tailwind CSS v4)
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Client web application for St Vincent's Gastro Department Management.
 
-Currently, two official plugins are available:
+## Architecture
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Framework**: React 19 SPA powered by Vite 8 with Tailwind CSS v4.
+- **Entry point**: `src/main.jsx` -> `src/App.jsx`.
+- **API abstraction**: `src/api.js` (handles Supabase, FastAPI backend proxy via `/api`, and `localStorage` fallback).
 
-## React Compiler
+## Core Modules & Components
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- [App.jsx](file:///Users/cbasnayake/Documents/Microsaas/Gastro%20Dept%20management%20site/frontend/src/App.jsx): Top navigation, PIN verification modal, tabs for Weekly Digest, Full Roster, Shift Swaps, and Ingestion.
+- [ClinicManager.jsx](file:///Users/cbasnayake/Documents/Microsaas/Gastro%20Dept%20management%20site/frontend/src/ClinicManager.jsx): Outpatient clinic schedule view and leave clash coverage coordinator.
+- [TheatreGridManager.jsx](file:///Users/cbasnayake/Documents/Microsaas/Gastro%20Dept%20management%20site/frontend/src/TheatreGridManager.jsx): 4-week rotating endoscopy & theatre list scheduler.
+- [LeaveCalendar.jsx](file:///Users/cbasnayake/Documents/Microsaas/Gastro%20Dept%20management%20site/frontend/src/LeaveCalendar.jsx): Leave application calendar and review table.
+- [BulletinManager.jsx](file:///Users/cbasnayake/Documents/Microsaas/Gastro%20Dept%20management%20site/frontend/src/BulletinManager.jsx): Weekly department bulletin generator and preview.
+- [bulletinDocx.js](file:///Users/cbasnayake/Documents/Microsaas/Gastro%20Dept%20management%20site/frontend/src/bulletinDocx.js): Word `.docx` builder using `docx`.
+- [pdfGenerator.js](file:///Users/cbasnayake/Documents/Microsaas/Gastro%20Dept%20management%20site/frontend/src/pdfGenerator.js): Official St Vincent's Leave Application PDF form-filler using `pdf-lib`.
+- [theatreGrid.js](file:///Users/cbasnayake/Documents/Microsaas/Gastro%20Dept%20management%20site/frontend/src/theatreGrid.js): 4-week cycle calculation and endoscopy conflict detection.
+- [rosterParser.js](file:///Users/cbasnayake/Documents/Microsaas/Gastro%20Dept%20management%20site/frontend/src/rosterParser.js): In-browser Excel/CSV file parser using `xlsx`.
 
-## Expanding the Oxlint configuration
+## Development Commands
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+```bash
+# Install dependencies
+npm install
+
+# Run dev server with hot reload (proxies /api to http://localhost:8080)
+npm run dev -- --port 3000
+
+# Build production bundle
+npm run build
+
+# Lint
+npm run lint
+```
