@@ -20,6 +20,8 @@ const LS_THEATRE_TEMPLATES = 'svha_gastro_theatre_templates_v2_all_weeks';
 const LS_ENDO_OVERRIDES = 'svha_gastro_endo_overrides_v1';
 const LS_LEAVE_SEED_VER = 'svha_gastro_leave_seed_v3_theatre';
 const LS_ROSTER_SEED_VER = 'svha_gastro_roster_seed_v2_gicc_fjc';
+const LS_CLINIC_SEED_VER = 'svha_gastro_clinic_seed_v3_fgc';
+const LS_CLINIC_ROSTER = 'svha_gastro_clinic_roster';
 
 // Init local storage if empty or if leave seed was updated from V2 Dec 26 CSV
 function initLocalStore() {
@@ -47,6 +49,12 @@ function initLocalStore() {
     localStorage.setItem(LS_LEAVE_SEED_VER, '1');
   } else if (!localStorage.getItem(LS_LEAVE)) {
     localStorage.setItem(LS_LEAVE, JSON.stringify(initialSeed.leave || []));
+  }
+  if (localStorage.getItem(LS_CLINIC_SEED_VER) !== '1') {
+    import('./clinic_roster_seed.json').then(seedMod => {
+      localStorage.setItem(LS_CLINIC_ROSTER, JSON.stringify(seedMod.default?.clinics || []));
+      localStorage.setItem(LS_CLINIC_SEED_VER, '1');
+    }).catch(() => {});
   }
 }
 initLocalStore();
@@ -323,10 +331,11 @@ export const api = {
       // fallback
     }
     const seed = (await import('./clinic_roster_seed.json')).default;
-    let list = JSON.parse(localStorage.getItem('svha_gastro_clinic_roster') || 'null');
-    if (!list) {
+    let list = JSON.parse(localStorage.getItem(LS_CLINIC_ROSTER) || 'null');
+    if (!list || localStorage.getItem(LS_CLINIC_SEED_VER) !== '1') {
       list = seed.clinics || [];
-      localStorage.setItem('svha_gastro_clinic_roster', JSON.stringify(list));
+      localStorage.setItem(LS_CLINIC_ROSTER, JSON.stringify(list));
+      localStorage.setItem(LS_CLINIC_SEED_VER, '1');
     }
     if (params.clinic_name) list = list.filter(c => c.clinic_name === params.clinic_name);
     if (params.staff_name) list = list.filter(c => c.staff_name?.toLowerCase().includes(params.staff_name.toLowerCase()));

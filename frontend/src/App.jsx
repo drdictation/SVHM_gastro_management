@@ -9,6 +9,7 @@ import { parseRosterFile, parseLeaveFile } from './rosterParser';
 import BulletinManager from './BulletinManager';
 import TheatreGridManager from './TheatreGridManager';
 import ClinicManager from './ClinicManager';
+import clinicSeedData from './clinic_roster_seed.json';
 import {
   DAYS_OF_WEEK,
   GASTRO_ROOMS,
@@ -53,6 +54,24 @@ export function formatDDMMYYYY(dateInput) {
     return `${parts[2]}/${parts[1]}/${parts[0]}`;
   }
   return str;
+}
+
+// Helper: Normalize any date input (DD/MM/YYYY or YYYY-MM-DD) to ISO YYYY-MM-DD
+export function toISODateString(val) {
+  if (!val) return '';
+  const s = String(val).trim();
+  const parts = s.split(/[\/\-]/);
+  if (parts.length === 3) {
+    if (parts[2].length === 4) {
+      // DD/MM/YYYY -> YYYY-MM-DD
+      return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+    }
+    if (parts[0].length === 4) {
+      // YYYY-MM-DD
+      return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+    }
+  }
+  return s;
 }
 
 export default function App() {
@@ -185,11 +204,18 @@ export default function App() {
 
   // Live Clinic Clashes on Leave Form
   const liveFormClinicClashes = useMemo(() => {
-    if (!leaveForm.staff_name || !leaveForm.start_date || !clinicEntries.length) return [];
-    const start = leaveForm.start_date;
-    const end = leaveForm.end_date || leaveForm.start_date;
-    return clinicEntries.filter(c => {
-      if (!c.date || c.date < start || c.date > end) return false;
+    if (!leaveForm.staff_name || !leaveForm.start_date) return [];
+    const entries = (clinicEntries && clinicEntries.length > 0)
+      ? clinicEntries
+      : (clinicSeedData?.clinics || []);
+
+    const start = toISODateString(leaveForm.start_date);
+    const end = toISODateString(leaveForm.end_date || leaveForm.start_date);
+    if (!start || !end) return [];
+
+    return entries.filter(c => {
+      const cDate = toISODateString(c.date);
+      if (!cDate || cDate < start || cDate > end) return false;
       if (c.status === 'off_routine' || c.status === 'holiday' || c.status === 'closed') return false;
       return matchDoctorName(c.staff_name, leaveForm.staff_name);
     });
