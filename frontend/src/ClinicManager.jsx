@@ -9,6 +9,7 @@ import { findLeaveClashes, createDefaultTheatreTemplates } from './theatreGrid';
 
 const CLINIC_NAMES = [
   'ALL',
+  'FUNCTIONAL GUT',
   'GASTRO',
   'OES',
   'RAE MONDAY',

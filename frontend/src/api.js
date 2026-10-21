@@ -181,6 +181,15 @@ export const api = {
   },
 
   async updateLeave(id, patch) {
+    try {
+      await fetch(`/api/leave/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch)
+      });
+    } catch (e) {
+      console.warn('Backend updateLeave note:', e);
+    }
     if (isSupabaseConfigured) {
       await supabase.from('leave_applications').update(patch).eq('id', id);
     }

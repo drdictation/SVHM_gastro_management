@@ -328,6 +328,55 @@
       "email": "sam.hume@svha.org.au",
       "role": "consultant",
       "is_coordinator": 0
+    },
+    {
+      "id": 101,
+      "name": "Dr Jessica Green",
+      "email": "jessica.green@svha.org.au",
+      "role": "consultant",
+      "is_coordinator": 0
+    },
+    {
+      "id": 102,
+      "name": "Cherry De Crespigny",
+      "email": "cherry.decrespigny@svha.org.au",
+      "role": "allied_health",
+      "is_coordinator": 0
+    },
+    {
+      "id": 103,
+      "name": "Psychiatry Registrar",
+      "email": "psych.registrar@svha.org.au",
+      "role": "registrar",
+      "is_coordinator": 0
+    },
+    {
+      "id": 104,
+      "name": "Anna Stanley",
+      "email": "anna.stanley@svha.org.au",
+      "role": "allied_health",
+      "is_coordinator": 0
+    },
+    {
+      "id": 105,
+      "name": "Jacqueline Zaki",
+      "email": "jacqueline.zaki@svha.org.au",
+      "role": "allied_health",
+      "is_coordinator": 0
+    },
+    {
+      "id": 106,
+      "name": "Madeline Green",
+      "email": "madeline.green@svha.org.au",
+      "role": "allied_health",
+      "is_coordinator": 0
+    },
+    {
+      "id": 107,
+      "name": "Gastroenterology Registrar",
+      "email": "gastro.registrar@svha.org.au",
+      "role": "registrar",
+      "is_coordinator": 0
     }
   ],
   "roster": [

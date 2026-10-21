@@ -326,10 +326,13 @@ def import_all():
     # 6. Import Clinic Leave Roster (2026-2028)
     import_clinic_roster(conn)
 
-    # 7. Import SMS Monthly Leave Update
+    # 7. Import Functional Gut Clinic (Thursdays 2026-2028)
+    import_functional_gut_clinic(conn)
+
+    # 8. Import SMS Monthly Leave Update
     import_sms_leave(conn)
 
-    # 8. Import Theatre Grid (Endoscopy Lists)
+    # 9. Import Theatre Grid (Endoscopy Lists)
     import_theatre_grid(conn)
 
     conn.commit()
@@ -433,6 +436,121 @@ def import_clinic_roster(conn):
                         INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (sheet_name, d_val, day_of_week, staff_name, 'attending', None, 'not_required', cell_val))
+
+def import_functional_gut_clinic(conn):
+    cur = conn.cursor()
+
+    # 1. Ensure all Functional Gut Clinic clinicians exist in staff table
+    fgc_staff = [
+        ("Dr Chamara Basnayake", "chamara.basnayake@svha.org.au", "consultant", 1),
+        ("Dr Ralley Prentice", "ralley.prentice@svha.org.au", "consultant", 0),
+        ("Gastroenterology Registrar", "gastro.registrar@svha.org.au", "registrar", 0),
+        ("Cherry De Crespigny", "cherry.decrespigny@svha.org.au", "allied_health", 0),
+        ("Dr Hannah Kim", "hannah.kim@svha.org.au", "consultant", 0),
+        ("Dr Jessica Green", "jessica.green@svha.org.au", "consultant", 0),
+        ("Psychiatry Registrar", "psych.registrar@svha.org.au", "registrar", 0),
+        ("Anna Stanley", "anna.stanley@svha.org.au", "allied_health", 0),
+        ("Jacqueline Zaki", "jacqueline.zaki@svha.org.au", "allied_health", 0),
+        ("Madeline Green", "madeline.green@svha.org.au", "allied_health", 0)
+    ]
+
+    for name, email, role, is_coord in fgc_staff:
+        cur.execute(
+            "INSERT OR IGNORE INTO staff (name, email, role, is_coordinator) VALUES (?, ?, ?, ?)",
+            (name, email, role, is_coord)
+        )
+
+    # 2. Clear any prior Functional Gut clinic entries
+    cur.execute("DELETE FROM clinic_roster WHERE clinic_name = 'FUNCTIONAL GUT'")
+
+    # 3. Anchor: Thursday 15th October 2026 is Cycle A
+    anchor_dt = datetime.date(2026, 10, 15)
+
+    # Date range: 2026-01-01 to 2028-12-31
+    start_dt = datetime.date(2026, 1, 1)
+    end_dt = datetime.date(2028, 12, 31)
+
+    public_holidays = {
+        "2026-01-01": "PUBLIC HOLIDAY — New Year's Day (no clinic)",
+        "2027-01-01": "PUBLIC HOLIDAY — New Year's Day (no clinic)",
+        "2028-01-01": "PUBLIC HOLIDAY — New Year's Day (no clinic)"
+    }
+
+    curr = start_dt
+    while curr <= end_dt:
+        if curr.weekday() == 3: # Thursday
+            d_str = curr.strftime("%Y-%m-%d")
+            weeks_diff = (curr - anchor_dt).days // 7
+            is_cycle_a = (weeks_diff % 2 == 0)
+
+            is_holiday = d_str in public_holidays
+            holiday_note = public_holidays.get(d_str)
+
+            # Weekly team
+            weekly_members = [
+                ("Dr Chamara Basnayake", "Consultant (PM)"),
+                ("Dr Ralley Prentice", "Consultant (PM)"),
+                ("Gastroenterology Registrar", "Registrar (PM)"),
+                ("Cherry De Crespigny", "Physiotherapist (PM)"),
+                ("Dr Hannah Kim", "Psychiatrist (PM)"),
+                ("Dr Jessica Green", "Psychiatrist (PM)"),
+                ("Psychiatry Registrar", "Psychiatry Registrar (PM)")
+            ]
+
+            for s_name, role_note in weekly_members:
+                if is_holiday:
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES ('FUNCTIONAL GUT', ?, 'Thursday', ?, 'holiday', NULL, 'not_required', ?)
+                    ''', (d_str, s_name, holiday_note))
+                else:
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES ('FUNCTIONAL GUT', ?, 'Thursday', ?, 'attending', NULL, 'not_required', ?)
+                    ''', (d_str, s_name, role_note))
+
+            # Alternating team:
+            # Anna Stanley (Cycle A)
+            # Jacqueline Zaki & Madeline Green (Cycle B)
+            if is_holiday:
+                for alt_name, role_label in [
+                    ("Anna Stanley", "Dietitian"),
+                    ("Jacqueline Zaki", "Physiotherapist"),
+                    ("Madeline Green", "Dietitian")
+                ]:
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES ('FUNCTIONAL GUT', ?, 'Thursday', ?, 'holiday', NULL, 'not_required', ?)
+                    ''', (d_str, alt_name, holiday_note))
+            else:
+                if is_cycle_a:
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES ('FUNCTIONAL GUT', ?, 'Thursday', 'Anna Stanley', 'attending', NULL, 'not_required', 'Dietitian (Cycle A)')
+                    ''', (d_str,))
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES ('FUNCTIONAL GUT', ?, 'Thursday', 'Jacqueline Zaki', 'off_routine', NULL, 'not_required', 'Physiotherapist (Off Cycle A)')
+                    ''', (d_str,))
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES ('FUNCTIONAL GUT', ?, 'Thursday', 'Madeline Green', 'off_routine', NULL, 'not_required', 'Dietitian (Off Cycle A)')
+                    ''', (d_str,))
+                else:
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES ('FUNCTIONAL GUT', ?, 'Thursday', 'Anna Stanley', 'off_routine', NULL, 'not_required', 'Dietitian (Off Cycle B)')
+                    ''', (d_str,))
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES ('FUNCTIONAL GUT', ?, 'Thursday', 'Jacqueline Zaki', 'attending', NULL, 'not_required', 'Physiotherapist (Cycle B)')
+                    ''', (d_str,))
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES ('FUNCTIONAL GUT', ?, 'Thursday', 'Madeline Green', 'attending', NULL, 'not_required', 'Dietitian (Cycle B)')
+                    ''', (d_str,))
+
+        curr += datetime.timedelta(days=1)
 
 def import_sms_leave(conn):
     cur = conn.cursor()

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Calendar, RefreshCw, Mail, CheckCircle2, XCircle, ArrowRightLeft, 
-  User, Clock, ShieldCheck, Download, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, Upload, KeyRound, Stethoscope, Trash2, Building2
+  User, Clock, ShieldCheck, Download, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, Upload, KeyRound, Stethoscope, Trash2, Building2, PlusCircle
 } from 'lucide-react';
 import { api, isSupabaseConfigured } from './api';
 import { generateLeavePdf } from './pdfGenerator';
@@ -62,6 +62,7 @@ export default function App() {
   const [pinInput, setPinInput] = useState('');
   const [pinVerified, setPinVerified] = useState(false);
   const [showPinModal, setShowPinModal] = useState(false);
+  const [pinPendingAction, setPinPendingAction] = useState(null);
 
   // Weekly digest initialized to current Melbourne week Monday
   const [weekMonday, setWeekMonday] = useState(getMondayOfCurrentWeek());

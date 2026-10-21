@@ -586,6 +586,8 @@ class LeaveApplicationUpdate(BaseModel):
     costing: Optional[str] = None
     allowances: Optional[str] = None
     status: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[str] = None
 
 class LeaveBulkImport(BaseModel):
     mode: str = "replace"  # 'replace' or 'merge'
@@ -602,6 +604,13 @@ def update_leave_application(leave_id: int, patch: LeaveApplicationUpdate):
     if updates:
         set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
         conn.execute(f"UPDATE leave_applications SET {set_clause} WHERE id = ?", (*updates.values(), leave_id))
+        if updates.get("status") == "approved":
+            now = datetime.datetime.now().isoformat()
+            actor = updates.get("approved_by") or "Coordinator"
+            conn.execute(
+                "INSERT INTO audit_logs (timestamp, actor, action, details) VALUES (?, ?, ?, ?)",
+                (now, actor, "LEAVE_APPROVED", f"Leave application #{leave_id} approved by {actor}")
+            )
         conn.commit()
     updated = dict(conn.execute("SELECT * FROM leave_applications WHERE id = ?", (leave_id,)).fetchone())
     conn.close()
