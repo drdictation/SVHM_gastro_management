@@ -269,10 +269,20 @@ export default function App() {
     });
   }, [leaveApplications, theatreTemplates, rosterEntries, endoOverrides]);
 
+  const pendingLeaveCount = useMemo(() => {
+    return enrichedLeaveList.filter(l => l.status === 'submitted' || (!l.status && l.status !== 'approved')).length;
+  }, [enrichedLeaveList]);
+
   const filteredLeaveList = useMemo(() => {
     return enrichedLeaveList.filter(item => {
       if (leaveSearch && !item.staff_name.toLowerCase().includes(leaveSearch.toLowerCase())) {
         return false;
+      }
+      if (leaveFilterMode === 'pending') {
+        return item.status === 'submitted' || (!item.status && item.status !== 'approved');
+      }
+      if (leaveFilterMode === 'approved') {
+        return item.status === 'approved';
       }
       if (leaveFilterMode === 'endo_clashes') {
         return item.clashes.endoClashes.length > 0 || Boolean(item.costing);
@@ -437,6 +447,53 @@ export default function App() {
     setLeaveApplications(next);
   };
 
+  const executeApproveLeave = async (app) => {
+    const approver = currentUser?.name || 'Department Coordinator';
+    const approvedAt = new Date().toISOString();
+    await api.updateLeave(app.id, {
+      status: 'approved',
+      approved_by: approver,
+      approved_at: approvedAt
+    });
+    setLeaveApplications(prev =>
+      prev.map(item => item.id === app.id ? { ...item, status: 'approved', approved_by: approver, approved_at: approvedAt } : item)
+    );
+    setStatusMsg(`Leave application for ${app.staff_name} approved!`);
+    setTimeout(() => setStatusMsg(''), 4000);
+  };
+
+  const handleApproveLeave = async (app) => {
+    if (!pinVerified && !currentUser?.is_coordinator) {
+      setPinPendingAction(() => () => executeApproveLeave(app));
+      setShowPinModal(true);
+      return;
+    }
+    await executeApproveLeave(app);
+  };
+
+  const executeRejectLeave = async (app) => {
+    const approver = currentUser?.name || 'Department Coordinator';
+    await api.updateLeave(app.id, {
+      status: 'rejected',
+      approved_by: approver,
+      approved_at: new Date().toISOString()
+    });
+    setLeaveApplications(prev =>
+      prev.map(item => item.id === app.id ? { ...item, status: 'rejected', approved_by: approver } : item)
+    );
+    setStatusMsg(`Leave application for ${app.staff_name} rejected.`);
+    setTimeout(() => setStatusMsg(''), 4000);
+  };
+
+  const handleRejectLeave = async (app) => {
+    if (!pinVerified && !currentUser?.is_coordinator) {
+      setPinPendingAction(() => () => executeRejectLeave(app));
+      setShowPinModal(true);
+      return;
+    }
+    await executeRejectLeave(app);
+  };
+
   const handleLeaveCsvUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -535,23 +592,34 @@ export default function App() {
             <h1 className="text-xl md:text-2xl font-bold mt-1">Gastroenterology Department Portal</h1>
           </div>
 
-          <div className="flex items-center gap-3">
-            <User className="w-5 h-5 text-blue-200" />
-            <select
-              value={currentUser?.name || ''}
-              onChange={(e) => {
-                const s = staffList.find(st => st.name === e.target.value);
-                setCurrentUser(s);
-                setLeaveForm(prev => ({ ...prev, staff_name: s?.name || '' }));
-              }}
-              className="bg-blue-800 text-white text-sm border border-blue-600 rounded px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-400"
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <button
+              onClick={() => setActiveTab('leave')}
+              className="flex items-center gap-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow border border-emerald-300 transition-all hover:scale-105"
+              title="Open St Vincent's Official Leave Application Form"
             >
-              {staffList.map(st => (
-                <option key={st.id || st.name} value={st.name}>
-                  {st.name} {st.is_coordinator ? '(Coordinator)' : ''}
-                </option>
-              ))}
-            </select>
+              <PlusCircle className="w-4 h-4 text-slate-950" />
+              <span>Apply for Leave</span>
+            </button>
+
+            <div className="flex items-center gap-2 bg-blue-800/80 px-2.5 py-1.5 rounded-lg border border-blue-700">
+              <User className="w-4 h-4 text-blue-200" />
+              <select
+                value={currentUser?.name || ''}
+                onChange={(e) => {
+                  const s = staffList.find(st => st.name === e.target.value);
+                  setCurrentUser(s);
+                  setLeaveForm(prev => ({ ...prev, staff_name: s?.name || '', applicant_email: s?.email || '' }));
+                }}
+                className="bg-transparent text-white text-xs font-medium focus:outline-none cursor-pointer"
+              >
+                {staffList.map(st => (
+                  <option key={st.id || st.name} value={st.name} className="bg-slate-900 text-white">
+                    {st.name} {st.is_coordinator ? '(Coordinator)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
 
@@ -561,7 +629,11 @@ export default function App() {
             { id: 'weekly', label: 'Weekly Rosters & Wards', icon: Calendar },
             { id: 'theatre', label: 'Endo & Theatre Grid', icon: Stethoscope },
             { id: 'clinics', label: 'Clinics & Leave Coordinator', icon: Building2 },
-            { id: 'leave', label: 'Leave & Endo Clashes', icon: FileText },
+            { 
+              id: 'leave', 
+              label: pendingLeaveCount > 0 ? `📝 Leave Form & Approvals (${pendingLeaveCount})` : '📝 Leave Form & Approvals', 
+              icon: FileText 
+            },
             { id: 'bulletin', label: 'Weekly Bulletin', icon: FileText },
             { id: 'roster', label: 'Full Roster', icon: Clock },
             { id: 'swaps', label: `Shift Swaps (${swaps.filter(s => s.status.startsWith('pending')).length})`, icon: ArrowRightLeft },
@@ -1212,6 +1284,8 @@ export default function App() {
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {[
+                    { id: 'pending', label: `Pending Approval (${pendingLeaveCount})` },
+                    { id: 'approved', label: `Approved (${enrichedLeaveList.filter(i => i.status === 'approved').length})` },
                     { id: 'all', label: `All Leave (${enrichedLeaveList.length})` },
                     {
                       id: 'endo_clashes',
@@ -1271,6 +1345,20 @@ export default function App() {
                               <span className="bg-slate-200 text-slate-700 px-2 py-0.5 rounded text-[10px] font-semibold">
                                 {app.leave_type}
                               </span>
+                              {app.status === 'approved' ? (
+                                <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                  Approved {app.approved_by ? `by ${app.approved_by}` : ''}
+                                </span>
+                              ) : app.status === 'rejected' ? (
+                                <span className="bg-rose-100 text-rose-800 border border-rose-300 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1">
+                                  <XCircle className="w-3 h-3 text-rose-600" /> Rejected
+                                </span>
+                              ) : (
+                                <span className="bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1">
+                                  <Clock className="w-3 h-3 text-amber-700" /> Pending Approval
+                                </span>
+                              )}
                               {app.clashes.cycleWeeks.length > 0 && (
                                 <span className="bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded text-[10px] font-bold">
                                   Cycle {app.clashes.cycleWeeks.map(w => `W${w}`).join(', ')}
@@ -1282,10 +1370,38 @@ export default function App() {
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-2 self-end sm:self-center">
+                          <div className="flex items-center gap-1.5 self-end sm:self-center flex-wrap">
+                            {app.status !== 'approved' ? (
+                              <button
+                                onClick={() => handleApproveLeave(app)}
+                                className="flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-semibold shadow-sm"
+                                title="Approve Leave as Coordinator"
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5" /> Approve
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleRejectLeave(app)}
+                                className="px-2 py-0.5 bg-white border border-slate-300 hover:bg-rose-50 text-slate-500 hover:text-rose-700 rounded text-[10px]"
+                                title="Revoke Approval"
+                              >
+                                Revoke
+                              </button>
+                            )}
+
+                            {app.status === 'submitted' && (
+                              <button
+                                onClick={() => handleRejectLeave(app)}
+                                className="px-2 py-0.5 bg-white border border-slate-300 hover:bg-rose-50 text-slate-500 hover:text-rose-700 rounded text-[10px]"
+                                title="Reject Leave"
+                              >
+                                Reject
+                              </button>
+                            )}
+
                             <button
                               onClick={() => generateLeavePdf(app)}
-                              className="flex items-center gap-1 px-2 py-1 bg-white border border-slate-300 rounded text-blue-700 hover:bg-blue-50 font-medium"
+                              className="flex items-center gap-1 px-2 py-1 bg-white border border-slate-300 rounded text-blue-700 hover:bg-blue-50 font-medium text-[11px]"
                               title="Download Official St Vincent's Leave PDF"
                             >
                               <Download className="w-3 h-3" /> PDF
@@ -1568,7 +1684,7 @@ export default function App() {
           <div className="bg-white rounded-xl max-w-sm w-full p-6 space-y-4 text-center">
             <KeyRound className="w-8 h-8 text-blue-600 mx-auto" />
             <h3 className="font-bold text-slate-800">Coordinator PIN Required</h3>
-            <p className="text-xs text-slate-500">Enter coordinator verification PIN (Default: 1234)</p>
+            <p className="text-xs text-slate-500">Enter coordinator verification PIN (Default: 1461)</p>
             <input
               type="password"
               value={pinInput}
@@ -1578,19 +1694,26 @@ export default function App() {
             />
             <div className="flex justify-center gap-2 pt-2">
               <button
-                onClick={() => setShowPinModal(false)}
+                onClick={() => {
+                  setShowPinModal(false);
+                  setPinPendingAction(null);
+                }}
                 className="px-3 py-1.5 border rounded text-xs text-slate-600"
               >
                 Cancel
               </button>
               <button
                 onClick={() => {
-                  if (pinInput === '1234') {
+                  if (pinInput === '1461' || pinInput === '1234') {
                     setPinVerified(true);
                     setShowPinModal(false);
                     setStatusMsg('Coordinator PIN verified!');
+                    if (pinPendingAction) {
+                      pinPendingAction();
+                      setPinPendingAction(null);
+                    }
                   } else {
-                    alert('Incorrect PIN');
+                    alert('Incorrect PIN (Default: 1461 or 1234)');
                   }
                 }}
                 className="px-4 py-1.5 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700"
