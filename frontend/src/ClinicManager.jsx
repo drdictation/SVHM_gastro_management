@@ -5,6 +5,7 @@ import {
   UserX, RefreshCw, Layers, Award, Sparkles, Building2, Check, ExternalLink
 } from 'lucide-react';
 import { api } from './api';
+import { findLeaveClashes, createDefaultTheatreTemplates } from './theatreGrid';
 
 const CLINIC_NAMES = [
   'ALL',
@@ -161,18 +162,57 @@ export default function ClinicManager({
     return baseSlots.sort((a, b) => a.date.localeCompare(b.date));
   }, [coordinatorData, clinicEntries, allUnifiedLeaves]);
 
-  // UNIFIED THEATRE CONFLICTS: Combine backend theatre conflicts with leaveApplications
+  // UNIFIED THEATRE CONFLICTS: Live computation using exact same findLeaveClashes engine as Leave & Endo Clashes
   const synthesizedTheatreConflicts = useMemo(() => {
-    const list = coordinatorData?.theatre_conflicts ? [...coordinatorData.theatre_conflicts] : [];
-    // Ensure every theatre conflict has accurate leave details from allUnifiedLeaves
-    return list.map(t => {
-      const lv = getDoctorLeaveForDate(t.staff_name, t.date, allUnifiedLeaves);
-      return {
-        ...t,
-        leave_type: t.leave_type || lv?.leave_type || 'Leave'
-      };
-    });
-  }, [coordinatorData, allUnifiedLeaves]);
+    const templates = theatreTemplates || createDefaultTheatreTemplates();
+    const allClashes = [];
+    const seen = new Set();
+
+    for (const lv of allUnifiedLeaves) {
+      const res = findLeaveClashes(
+        lv.staff_name,
+        lv.start_date,
+        lv.end_date,
+        templates,
+        rosterEntries,
+        endoOverrides
+      );
+      if (res?.endoClashes?.length) {
+        for (const ec of res.endoClashes) {
+          const key = `${ec.date}_${ec.room}_${ec.session}_${ec.doctor}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            allClashes.push({
+              id: `endo_${ec.date}_${ec.room}_${ec.session}_${ec.doctor}`.replace(/\s+/g, '_'),
+              date: ec.date,
+              day_of_week: ec.day,
+              session: ec.session,
+              room_name: ec.room,
+              list_type: ec.listType || 'ENDO',
+              staff_name: ec.doctor,
+              leave_type: lv.leave_type || 'Approved Leave',
+              coverage_status: ec.cover_staff_name ? 'covered' : 'uncovered',
+              covering_staff_name: ec.cover_staff_name || null,
+              notes: `${ec.startTime || ''} - ${ec.site || ''}`.trim()
+            });
+          }
+        }
+      }
+    }
+
+    // Fallback if theatreTemplates not ready
+    if (!allClashes.length && coordinatorData?.theatre_conflicts?.length) {
+      for (const t of coordinatorData.theatre_conflicts) {
+        const lv = getDoctorLeaveForDate(t.staff_name, t.date, allUnifiedLeaves);
+        allClashes.push({
+          ...t,
+          leave_type: t.leave_type || lv?.leave_type || 'Approved Leave'
+        });
+      }
+    }
+
+    return allClashes.sort((a, b) => a.date.localeCompare(b.date));
+  }, [allUnifiedLeaves, theatreTemplates, rosterEntries, endoOverrides, coordinatorData]);
 
   // UNIFIED GICC CONFLICTS: Cross-reference GICC entries with all leaves
   const synthesizedGiccConflicts = useMemo(() => {
@@ -325,6 +365,11 @@ export default function ClinicManager({
       if (type === 'clinic') {
         await api.updateClinicCoverage(item.id, selectedCoverDoctor, coverNotes);
       } else if (type === 'theatre') {
+        const overrideKey = `${item.date}_${item.room_name}_${item.session}_${item.staff_name}`;
+        await api.saveEndoOverride(overrideKey, {
+          cover_staff_name: selectedCoverDoctor || null,
+          status: selectedCoverDoctor ? 'covered' : 'scheduled'
+        });
         await api.updateTheatreCoverage(item.id, selectedCoverDoctor, coverNotes);
       }
       setCoverModalOpen(false);
