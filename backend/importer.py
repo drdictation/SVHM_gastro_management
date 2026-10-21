@@ -14,12 +14,11 @@ def parse_date(val):
         return val.strftime("%Y-%m-%d")
     if isinstance(val, str):
         val = val.strip()
-        try:
-            # Try YYYY-MM-DD
-            dt = datetime.datetime.strptime(val[:10], "%Y-%m-%d")
-            return dt.strftime("%Y-%m-%d")
-        except:
-            pass
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%b-%y", "%d-%m-%Y"):
+            try:
+                return datetime.datetime.strptime(val[:10], fmt).strftime("%Y-%m-%d")
+            except:
+                pass
     return None
 
 CUSTOM_MAP = {
@@ -27,6 +26,7 @@ CUSTOM_MAP = {
     'Prof Alex Thompson': 'Prof. Alex Thompson',
     'Jacinta Holmes': 'Assoc Prof Jacinta Holmes',
     'Prof Jessica Howell': 'Assoc Prof Jessica Howell',
+    'Jessica Howell': 'Assoc Prof Jessica Howell',
     'Dan Tassone': 'Dan Tassone',
     'Daniel Tassone': 'Dan Tassone',
     'Nik Vootukuru': 'Nikil Vootukuru',
@@ -34,6 +34,78 @@ CUSTOM_MAP = {
     'Kyle Wu': 'Dr Kyle Wu',
     'Declan Connoley': 'Dr Declan Connoley',
     'Tara Fox': 'Dr Tara Fox',
+    'John Ding': 'Assoc Prof John Nik Ding',
+    'Emily Wright': 'Assoc Prof Emily Wright',
+    'Ashley Miller': 'Assoc Prof Ashley Miller',
+    'Bill Connell': 'Assoc Prof Bill Connell',
+    'Paul Desmond': 'Assoc Prof Paul Desmond',
+    'Marno Ryan': 'Assoc Prof Marno Ryan',
+    'Andrew Taylor': 'Assoc Prof Andrew Taylor',
+    'Bronte Holt': 'Assoc Prof Bronte Holt',
+    'Simon Hume': 'Dr Simon Hume',
+    'Tamie Samyue': 'Tamie Samyue',
+    'Hannah Kim': 'Dr Hannah Kim',
+    'Chamara Basnayake': 'Dr Chamara Basnayake',
+    'Georgie Cameron': 'Dr Georgie Cameron',
+    'Catherine Croagh': 'Dr Catherine Croagh',
+    'David Iser': 'Dr David Iser',
+    'Edward Tsoi': 'Dr Edward Tsoi',
+    'Emma Flanagan': 'Dr Emma Flanagan',
+    'Linda Yang': 'Dr Linda Yang',
+    'Mark Lust': 'Dr Mark Lust',
+    'Michael De Gregorio': 'Dr Michael De Gregorio',
+    'Ola Niewiadomski': 'Dr Ola Niewiadomski',
+    'Ralley Prentice': 'Dr Ralley Prentice',
+    'Robert Chen': 'Dr Robert Chen',
+    'Sasha Fehily': 'Dr Sasha Fehily',
+    'Suzanne Mahady': 'Dr Suzanne Mahady',
+    'Swee Lin Chen Yi Mei': 'Dr Swee Lin Chen Yi Mei',
+    'Thai Hong': 'Dr Thai Hong',
+    'Tim Papaluca': 'Dr Tim Papaluca',
+    'Tony He': 'Dr Tony He',
+    'Ann Farrell': 'Dr Ann Farrell',
+    'Barbara Demediuk': 'Dr Barbara Demediuk',
+    'Imogen Hartley': 'Dr Imogen Hartley',
+    'Tanya Lee': 'Dr Tanya Lee',
+    'Lauren Andersson': 'Dr Lauren Andersson',
+    'Nick Clark': 'Dr Nick Clark',
+    'Kathryn Gazelakis': 'Dr Kathryn Gazelakis'
+}
+
+CLINIC_DOCTOR_MAP = {
+    'ALEX': 'Prof. Alex Thompson',
+    'ANDREW': 'Assoc Prof Andrew Taylor',
+    'ANN': 'Dr Ann Farrell',
+    'ASHLEY': 'Assoc Prof Ashley Miller',
+    'BARB': 'Dr Barbara Demediuk',
+    'BILL': 'Assoc Prof Bill Connell',
+    'CATHERINE': 'Dr Catherine Croagh',
+    'CHAMARA': 'Dr Chamara Basnayake',
+    'DAVID': 'Dr David Iser',
+    'ED': 'Dr Edward Tsoi',
+    'EMILY': 'Assoc Prof Emily Wright',
+    'EMMA': 'Dr Emma Flanagan',
+    'FELLOW': 'RESEARCH FELLOWS',
+    'GEORGIE': 'Dr Georgie Cameron',
+    'HANNAH (IBD PSYCH)': 'Dr Hannah Kim',
+    'JACINTA': 'Assoc Prof Jacinta Holmes',
+    'JESS': 'Assoc Prof Jessica Howell',
+    'JOHN': 'Assoc Prof John Nik Ding',
+    'LINDA': 'Dr Linda Yang',
+    'MARK': 'Dr Mark Lust',
+    'MARNO': 'Assoc Prof Marno Ryan',
+    'OLA': 'Dr Ola Niewiadomski',
+    'PAUL': 'Assoc Prof Paul Desmond',
+    'RALLEY': 'Dr Ralley Prentice',
+    'REG': 'Registrar',
+    'SASHA': 'Dr Sasha Fehily',
+    'SIMON': 'Dr Simon Hume',
+    'SUZANNE': 'Dr Suzanne Mahady',
+    'SWEELIN': 'Dr Swee Lin Chen Yi Mei',
+    'TAMIE': 'Tamie Samyue',
+    'THAI': 'Dr Thai Hong',
+    'TIM': 'Dr Tim Papaluca',
+    'TONY': 'Dr Tony He'
 }
 
 def clean_name(name):
@@ -251,13 +323,200 @@ def import_all():
                 except Exception as e:
                     pass
 
+    # 6. Import Clinic Leave Roster (2026-2028)
+    import_clinic_roster(conn)
+
+    # 7. Import SMS Monthly Leave Update
+    import_sms_leave(conn)
+
+    # 8. Import Theatre Grid (Endoscopy Lists)
+    import_theatre_grid(conn)
+
     conn.commit()
     cur.execute("SELECT count(*) FROM roster_entries")
     count = cur.fetchone()[0]
     cur.execute("SELECT count(*) FROM staff")
     staff_count = cur.fetchone()[0]
+    cur.execute("SELECT count(*) FROM clinic_roster")
+    clinic_count = cur.fetchone()[0]
+    cur.execute("SELECT count(*) FROM theatre_grid_entries")
+    theatre_count = cur.fetchone()[0]
     conn.close()
-    print(f"Import complete: {count} roster entries, {staff_count} staff loaded.")
+    print(f"Import complete: {count} roster entries, {staff_count} staff, {clinic_count} clinic entries, {theatre_count} theatre entries.")
+
+def import_clinic_roster(conn):
+    cur = conn.cursor()
+    cur.execute("DELETE FROM clinic_roster")
+    
+    # Ensure Simon Hume and Tamie Samyue in staff
+    cur.execute("INSERT OR IGNORE INTO staff (name, email, role, is_coordinator) VALUES (?, ?, ?, ?)",
+                ("Dr Simon Hume", "simon.hume@svha.org.au", "consultant", 0))
+    cur.execute("INSERT OR IGNORE INTO staff (name, email, role, is_coordinator) VALUES (?, ?, ?, ?)",
+                ("Tamie Samyue", "tamie.samyue@svha.org.au", "fellow", 0))
+
+    clinic_file = os.path.join(BASE_DIR, "StVs_Clinic_Leave_Roster_2026-2028.xlsx")
+    if not os.path.exists(clinic_file):
+        print("Clinic roster file not found:", clinic_file)
+        return
+
+    wb = openpyxl.load_workbook(clinic_file, data_only=True)
+    sheets = ['GASTRO', 'OES', 'RAE MONDAY', 'RAE TUESDAY', 'RAE FRIDAY', 'WEIGHT MANAGEMENT', 'LIVER', 'IBD', 'PO LIVER', 'HEPATOMA']
+
+    for sheet_name in sheets:
+        if sheet_name not in wb.sheetnames:
+            continue
+        ws = wb[sheet_name]
+        headers = [str(ws.cell(1, c).value or '').strip() for c in range(1, ws.max_column + 1)]
+
+        for r in range(2, ws.max_row + 1):
+            d_raw = ws.cell(r, 1).value
+            d_val = parse_date(d_raw)
+            if not d_val:
+                continue
+            day_of_week = str(ws.cell(r, 2).value or '').strip()
+
+            row_str = ' '.join([str(ws.cell(r, c).value or '') for c in range(1, ws.max_column + 1)])
+            is_holiday_row = 'PUBLIC HOLIDAY' in row_str.upper()
+            holiday_note = None
+            if is_holiday_row:
+                for c in range(1, ws.max_column + 1):
+                    val_c = str(ws.cell(r, c).value or '')
+                    if 'PUBLIC HOLIDAY' in val_c.upper():
+                        holiday_note = val_c.strip()
+                        break
+
+            for col_idx in range(3, len(headers) + 1):
+                doc_key = headers[col_idx - 1]
+                if not doc_key or doc_key in ['AMY', 'GEETHA']:
+                    continue
+                staff_name = CLINIC_DOCTOR_MAP.get(doc_key)
+                if not staff_name:
+                    continue
+
+                if is_holiday_row:
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (sheet_name, d_val, day_of_week, staff_name, 'holiday', None, 'not_required', holiday_note))
+                    continue
+
+                raw_cell = ws.cell(r, col_idx).value
+                cell_val = str(raw_cell).strip() if raw_cell is not None else ''
+                cell_upper = cell_val.upper()
+
+                if cell_val == '':
+                    # Attending scheduled clinic
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (sheet_name, d_val, day_of_week, staff_name, 'attending', None, 'not_required', None))
+                elif cell_upper in ['X', '.']:
+                    # Routine off
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (sheet_name, d_val, day_of_week, staff_name, 'off_routine', None, 'not_required', None))
+                elif 'CLOSED' in cell_upper:
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (sheet_name, d_val, day_of_week, staff_name, 'closed', None, 'not_required', cell_val))
+                elif 'LEAVE' in cell_upper or cell_val in ['Unknown', 'jj']:
+                    # On leave -> Needs coverage!
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (sheet_name, d_val, day_of_week, staff_name, 'on_leave', cell_val, 'uncovered', None))
+                else:
+                    # Specialized clinic tag (e.g. HEP B, HEPATOMA) -> Attending with note
+                    cur.execute('''
+                        INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (sheet_name, d_val, day_of_week, staff_name, 'attending', None, 'not_required', cell_val))
+
+def import_sms_leave(conn):
+    cur = conn.cursor()
+    sms_leave_file = os.path.join(BASE_DIR, "SMS monthly leave update V2(Dec 26).csv")
+    if not os.path.exists(sms_leave_file):
+        return
+
+    with open(sms_leave_file, "r", encoding="latin1") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            raw_name = r.get('Name')
+            if not raw_name or not str(raw_name).strip() or str(raw_name).strip() == 'Barb?':
+                continue
+            name = clean_name(str(raw_name).strip())
+            start_d = parse_date(r.get('Leave start date'))
+            end_d = parse_date(r.get('Leave end date'))
+            if not start_d:
+                continue
+            if not end_d:
+                end_d = start_d
+            l_type = r.get('Type') or 'Annual'
+
+            # Avoid exact duplicates
+            cur.execute('''
+                SELECT count(*) FROM leave_applications
+                WHERE staff_name = ? AND start_date = ? AND end_date = ?
+            ''', (name, start_d, end_d))
+            if cur.fetchone()[0] == 0:
+                cur.execute('''
+                    INSERT INTO leave_applications (staff_name, leave_type, start_date, end_date, status, manager_name, submission_date, created_at)
+                    VALUES (?, ?, ?, ?, 'approved', 'Department Coordinator', '2026-10-01', datetime('now'))
+                ''', (name, l_type, start_d, end_d))
+
+def import_theatre_grid(conn):
+    import json
+    cur = conn.cursor()
+    cur.execute("DELETE FROM theatre_grid_entries")
+
+    json_path = os.path.join(BASE_DIR, "frontend", "src", "theatre_grid_weeks.json")
+    if not os.path.exists(json_path):
+        return
+
+    with open(json_path, "r") as f:
+        weeks_data = json.load(f)
+
+    # Anchor Monday: 2026-11-02 is Week 3
+    anchor_dt = datetime.date(2026, 11, 2)
+    anchor_week = 3
+
+    # Generate cycle from 2026-10-05 (Monday) to 2027-12-27 (Monday)
+    start_monday = datetime.date(2026, 10, 5)
+    end_monday = datetime.date(2027, 12, 27)
+
+    day_offsets = {
+        "Monday": 0,
+        "Tuesday": 1,
+        "Wednesday": 2,
+        "Thursday": 3,
+        "Friday": 4
+    }
+
+    curr_monday = start_monday
+    while curr_monday <= end_monday:
+        weeks_diff = (curr_monday - anchor_dt).days // 7
+        cycle_week = ((weeks_diff + (anchor_week - 1)) % 4) + 1
+        week_key = str(cycle_week)
+
+        if week_key in weeks_data and "sessions" in weeks_data[week_key]:
+            for sess in weeks_data[week_key]["sessions"]:
+                day_name = sess.get("day")
+                offset = day_offsets.get(day_name, 0)
+                sess_date = (curr_monday + datetime.timedelta(days=offset)).strftime("%Y-%m-%d")
+                staff_name = clean_name(sess.get("staff_name") or "")
+                room = sess.get("room") or "Endo"
+                list_type = sess.get("listType") or "ENDO"
+                session_time = sess.get("session") or "AM"
+                notes = f"{sess.get('startTime', '')} - {sess.get('site', '')}".strip()
+
+                cur.execute('''
+                    INSERT INTO theatre_grid_entries (date, day_of_week, session, room_name, list_type, staff_name, coverage_status, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, 'not_required', ?)
+                ''', (sess_date, day_name, session_time, room, list_type, staff_name, notes))
+
+        curr_monday += datetime.timedelta(days=7)
 
 if __name__ == "__main__":
     import_all()

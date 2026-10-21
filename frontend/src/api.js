@@ -276,5 +276,100 @@ export const api = {
     }
     localStorage.setItem(LS_ENDO_OVERRIDES, JSON.stringify(current));
     return current;
+  },
+
+  // Clinic Roster
+  async getClinicRoster(params = {}) {
+    const cleanParams = Object.fromEntries(Object.entries(params).filter(([_, v]) => v !== undefined && v !== null && v !== ''));
+    const qs = new URLSearchParams(cleanParams).toString();
+    try {
+      const res = await fetch(`/api/clinic-roster${qs ? `?${qs}` : ''}`);
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch (e) {
+      // fallback
+    }
+    const seed = (await import('./clinic_roster_seed.json')).default;
+    let list = JSON.parse(localStorage.getItem('svha_gastro_clinic_roster') || 'null');
+    if (!list) {
+      list = seed.clinics || [];
+      localStorage.setItem('svha_gastro_clinic_roster', JSON.stringify(list));
+    }
+    if (params.clinic_name) list = list.filter(c => c.clinic_name === params.clinic_name);
+    if (params.staff_name) list = list.filter(c => c.staff_name?.toLowerCase().includes(params.staff_name.toLowerCase()));
+    if (params.coverage_status) list = list.filter(c => c.coverage_status === params.coverage_status);
+    if (params.status) list = list.filter(c => c.status === params.status);
+    if (params.start_date) list = list.filter(c => c.date >= params.start_date);
+    if (params.end_date) list = list.filter(c => c.date <= params.end_date);
+    return list;
+  },
+
+  async updateClinicCoverage(id, covering_staff_name, notes) {
+    try {
+      const res = await fetch(`/api/clinic-roster/${id}/cover`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ covering_staff_name, notes })
+      });
+      if (res.ok) return await res.json();
+    } catch (e) {
+      // fallback
+    }
+    const list = JSON.parse(localStorage.getItem('svha_gastro_clinic_roster') || '[]');
+    const idx = list.findIndex(c => c.id === id);
+    if (idx !== -1) {
+      list[idx].covering_staff_name = covering_staff_name || null;
+      list[idx].coverage_status = covering_staff_name ? 'covered' : 'uncovered';
+      if (notes) list[idx].notes = notes;
+      localStorage.setItem('svha_gastro_clinic_roster', JSON.stringify(list));
+      return list[idx];
+    }
+    return null;
+  },
+
+  async getLeaveCoverageCoordinator(params = {}) {
+    const cleanParams = Object.fromEntries(Object.entries(params).filter(([_, v]) => v !== undefined && v !== null && v !== ''));
+    const qs = new URLSearchParams(cleanParams).toString();
+    try {
+      const res = await fetch(`/api/leave-coverage-coordinator${qs ? `?${qs}` : ''}`);
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch (e) {
+      // fallback
+    }
+    return {
+      summary: {
+        uncovered_clinics: 0,
+        covered_clinics: 0,
+        theatre_conflicts: 0,
+        uncovered_theatre: 0,
+        gicc_conflicts: 0,
+        jc_conflicts: 0,
+        ward_oncall_conflicts: 0,
+        approved_leaves_count: 0
+      },
+      clinic_slots: [],
+      theatre_conflicts: [],
+      gicc_conflicts: [],
+      jc_conflicts: [],
+      ward_conflicts: [],
+      leaves: []
+    };
+  },
+
+  async updateTheatreCoverage(id, covering_staff_name, notes) {
+    try {
+      const res = await fetch(`/api/theatre-grid/${id}/cover`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ covering_staff_name, notes })
+      });
+      if (res.ok) return await res.json();
+    } catch (e) {
+      // fallback
+    }
+    return null;
   }
 };

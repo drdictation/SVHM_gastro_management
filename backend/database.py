@@ -76,6 +76,38 @@ def init_db():
     )
     ''')
 
+    # Clinic Roster table
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS clinic_roster (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        clinic_name TEXT NOT NULL,
+        date TEXT NOT NULL,
+        day_of_week TEXT,
+        staff_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'attending', -- 'attending', 'off_routine', 'on_leave', 'holiday', 'closed'
+        leave_type TEXT,
+        coverage_status TEXT DEFAULT 'not_required', -- 'not_required', 'uncovered', 'covered'
+        covering_staff_name TEXT,
+        notes TEXT
+    )
+    ''')
+
+    # Theatre Grid (Endoscopy Lists) table
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS theatre_grid_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        day_of_week TEXT,
+        session TEXT NOT NULL, -- 'AM', 'PM'
+        room_name TEXT NOT NULL,
+        list_type TEXT,
+        staff_name TEXT NOT NULL,
+        coverage_status TEXT DEFAULT 'not_required', -- 'not_required', 'uncovered', 'covered'
+        covering_staff_name TEXT,
+        notes TEXT
+    )
+    ''')
+
     conn.commit()
     conn.close()
 

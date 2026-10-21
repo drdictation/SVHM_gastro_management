@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Calendar, RefreshCw, Mail, CheckCircle2, XCircle, ArrowRightLeft, 
-  User, Clock, ShieldCheck, Download, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, Upload, KeyRound, Stethoscope, Trash2
+  User, Clock, ShieldCheck, Download, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, Upload, KeyRound, Stethoscope, Trash2, Building2
 } from 'lucide-react';
 import { api, isSupabaseConfigured } from './api';
 import { generateLeavePdf } from './pdfGenerator';
 import { parseRosterFile, parseLeaveFile } from './rosterParser';
 import BulletinManager from './BulletinManager';
 import TheatreGridManager from './TheatreGridManager';
+import ClinicManager from './ClinicManager';
 import {
   DAYS_OF_WEEK,
   GASTRO_ROOMS,
@@ -460,6 +461,7 @@ export default function App() {
           {[
             { id: 'weekly', label: 'Weekly Rosters & Wards', icon: Calendar },
             { id: 'theatre', label: 'Endo & Theatre Grid', icon: Stethoscope },
+            { id: 'clinics', label: 'Clinics & Leave Coordinator', icon: Building2 },
             { id: 'leave', label: 'Leave & Endo Clashes', icon: FileText },
             { id: 'bulletin', label: 'Weekly Bulletin', icon: FileText },
             { id: 'roster', label: 'Full Roster', icon: Clock },
@@ -626,6 +628,14 @@ export default function App() {
             setWeekMonday={setWeekMonday}
             weekEndoSchedule={weekEndoSchedule}
             openCoverModal={openCoverModal}
+            currentUser={currentUser}
+          />
+        )}
+
+        {/* TAB: CLINICS & LEAVE COORDINATOR */}
+        {activeTab === 'clinics' && (
+          <ClinicManager
+            staffList={staffList}
             currentUser={currentUser}
           />
         )}

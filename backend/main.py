@@ -570,4 +570,297 @@ def preview_leave_pdf(app_data: LeaveApplicationCreate):
         headers={"Content-Disposition": 'inline; filename="Leave_Application_Preview.pdf"'}
     )
 
+# Models for coverage assignment
+class CoverAssignmentRequest(BaseModel):
+    covering_staff_name: Optional[str] = None
+    notes: Optional[str] = None
+
+# 10. Clinic Roster endpoints
+@app.get("/api/clinic-roster")
+def get_clinic_roster(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    clinic_name: Optional[str] = None,
+    staff_name: Optional[str] = None,
+    coverage_status: Optional[str] = None,
+    status: Optional[str] = None
+):
+    conn = get_db()
+    query = "SELECT * FROM clinic_roster WHERE 1=1"
+    params = []
+    if start_date:
+        query += " AND date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND date <= ?"
+        params.append(end_date)
+    if clinic_name:
+        query += " AND clinic_name = ?"
+        params.append(clinic_name)
+    if staff_name:
+        query += " AND staff_name LIKE ?"
+        params.append(f"%{staff_name}%")
+    if coverage_status:
+        query += " AND coverage_status = ?"
+        params.append(coverage_status)
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    query += " ORDER BY date ASC, clinic_name ASC, staff_name ASC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.post("/api/clinic-roster/{entry_id}/cover")
+def update_clinic_coverage(entry_id: int, req: CoverAssignmentRequest):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM clinic_roster WHERE id = ?", (entry_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Clinic entry not found")
+    
+    new_cov_status = "covered" if req.covering_staff_name and req.covering_staff_name.strip() else "uncovered"
+    cov_name = req.covering_staff_name.strip() if req.covering_staff_name else None
+    
+    conn.execute("""
+        UPDATE clinic_roster
+        SET coverage_status = ?, covering_staff_name = ?, notes = COALESCE(?, notes)
+        WHERE id = ?
+    """, (new_cov_status, cov_name, req.notes, entry_id))
+    conn.commit()
+    updated = conn.execute("SELECT * FROM clinic_roster WHERE id = ?", (entry_id,)).fetchone()
+    conn.close()
+    return dict(updated)
+
+# 11. Theatre Grid (Endoscopy Lists) endpoints
+@app.get("/api/theatre-grid")
+def get_theatre_grid(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    staff_name: Optional[str] = None,
+    coverage_status: Optional[str] = None
+):
+    conn = get_db()
+    query = "SELECT * FROM theatre_grid_entries WHERE 1=1"
+    params = []
+    if start_date:
+        query += " AND date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND date <= ?"
+        params.append(end_date)
+    if staff_name:
+        query += " AND staff_name LIKE ?"
+        params.append(f"%{staff_name}%")
+    if coverage_status:
+        query += " AND coverage_status = ?"
+        params.append(coverage_status)
+    query += " ORDER BY date ASC, session ASC, room_name ASC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.post("/api/theatre-grid/{entry_id}/cover")
+def update_theatre_coverage(entry_id: int, req: CoverAssignmentRequest):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM theatre_grid_entries WHERE id = ?", (entry_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Theatre entry not found")
+    
+    new_cov_status = "covered" if req.covering_staff_name and req.covering_staff_name.strip() else "uncovered"
+    cov_name = req.covering_staff_name.strip() if req.covering_staff_name else None
+    
+    conn.execute("""
+        UPDATE theatre_grid_entries
+        SET coverage_status = ?, covering_staff_name = ?, notes = COALESCE(?, notes)
+        WHERE id = ?
+    """, (new_cov_status, cov_name, req.notes, entry_id))
+    conn.commit()
+    updated = conn.execute("SELECT * FROM theatre_grid_entries WHERE id = ?", (entry_id,)).fetchone()
+    conn.close()
+    return dict(updated)
+
+# 12. Master Leave & Coverage Coordinator endpoint
+@app.get("/api/leave-coverage-coordinator")
+def get_leave_coverage_coordinator(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    conn = get_db()
+    
+    # 1. Unified leave records from applications
+    leave_query = "SELECT * FROM leave_applications WHERE status = 'approved'"
+    leave_params = []
+    if start_date:
+        leave_query += " AND end_date >= ?"
+        leave_params.append(start_date)
+    if end_date:
+        leave_query += " AND start_date <= ?"
+        leave_params.append(end_date)
+    leave_query += " ORDER BY start_date ASC"
+    leaves = [dict(r) for r in conn.execute(leave_query, leave_params).fetchall()]
+
+    # Collect single-day clinic leave marks
+    cr_leave_query = "SELECT DISTINCT staff_name, date, leave_type FROM clinic_roster WHERE status = 'on_leave'"
+    cr_params = []
+    if start_date:
+        cr_leave_query += " AND date >= ?"
+        cr_params.append(start_date)
+    if end_date:
+        cr_leave_query += " AND date <= ?"
+        cr_params.append(end_date)
+    cr_leaves = conn.execute(cr_leave_query, cr_params).fetchall()
+    
+    leave_intervals = []
+    for l in leaves:
+        s_d = l.get("start_date")
+        e_d = l.get("end_date") or s_d
+        if e_d == "TBC":
+            e_d = "2099-12-31"
+        leave_intervals.append({
+            "staff_name": l.get("staff_name"),
+            "start_date": s_d,
+            "end_date": e_d,
+            "leave_type": l.get("leave_type") or "Leave",
+            "source": "leave_app"
+        })
+    for cl in cr_leaves:
+        leave_intervals.append({
+            "staff_name": cl["staff_name"],
+            "start_date": cl["date"],
+            "end_date": cl["date"],
+            "leave_type": cl["leave_type"] or "Leave",
+            "source": "clinic_sheet"
+        })
+
+    def is_on_leave(name, check_date):
+        for li in leave_intervals:
+            if li["staff_name"] == name and li["start_date"] <= check_date <= li["end_date"]:
+                return li
+        return None
+
+    # 2. Uncovered Clinics
+    clinic_query = "SELECT * FROM clinic_roster WHERE status = 'on_leave'"
+    clinic_params = []
+    if start_date:
+        clinic_query += " AND date >= ?"
+        clinic_params.append(start_date)
+    if end_date:
+        clinic_query += " AND date <= ?"
+        clinic_params.append(end_date)
+    clinic_query += " ORDER BY date ASC, clinic_name ASC"
+    clinic_slots = [dict(r) for r in conn.execute(clinic_query, clinic_params).fetchall()]
+
+    # 3. Theatre Grid Endoscopy conflicts
+    theatre_query = "SELECT * FROM theatre_grid_entries WHERE 1=1"
+    theatre_params = []
+    if start_date:
+        theatre_query += " AND date >= ?"
+        theatre_params.append(start_date)
+    if end_date:
+        theatre_query += " AND date <= ?"
+        theatre_params.append(end_date)
+    theatre_query += " ORDER BY date ASC, session ASC"
+    theatre_all = [dict(r) for r in conn.execute(theatre_query, theatre_params).fetchall()]
+    
+    theatre_conflicts = []
+    for t in theatre_all:
+        doc = t.get("staff_name")
+        d_date = t.get("date")
+        l_info = is_on_leave(doc, d_date)
+        if l_info:
+            t_copy = dict(t)
+            t_copy["leave_type"] = l_info["leave_type"]
+            t_copy["leave_source"] = l_info["source"]
+            theatre_conflicts.append(t_copy)
+
+    # 4. GICC Grand Rounds conflicts
+    gicc_query = "SELECT * FROM roster_entries WHERE entry_type = 'gicc'"
+    gicc_params = []
+    if start_date:
+        gicc_query += " AND date >= ?"
+        gicc_params.append(start_date)
+    if end_date:
+        gicc_query += " AND date <= ?"
+        gicc_params.append(end_date)
+    gicc_query += " ORDER BY date ASC"
+    gicc_all = [dict(r) for r in conn.execute(gicc_query, gicc_params).fetchall()]
+    
+    gicc_conflicts = []
+    for g in gicc_all:
+        doc = g.get("staff_name")
+        d_date = g.get("date")
+        l_info = is_on_leave(doc, d_date)
+        if l_info:
+            g_copy = dict(g)
+            g_copy["leave_type"] = l_info["leave_type"]
+            gicc_conflicts.append(g_copy)
+
+    # 5. Friday Journal Club conflicts
+    jc_query = "SELECT * FROM roster_entries WHERE entry_type = 'friday_jc'"
+    jc_params = []
+    if start_date:
+        jc_query += " AND date >= ?"
+        jc_params.append(start_date)
+    if end_date:
+        jc_query += " AND date <= ?"
+        jc_params.append(end_date)
+    jc_query += " ORDER BY date ASC"
+    jc_all = [dict(r) for r in conn.execute(jc_query, jc_params).fetchall()]
+    
+    jc_conflicts = []
+    for j in jc_all:
+        doc = j.get("staff_name")
+        d_date = j.get("date")
+        l_info = is_on_leave(doc, d_date)
+        if l_info:
+            j_copy = dict(j)
+            j_copy["leave_type"] = l_info["leave_type"]
+            jc_conflicts.append(j_copy)
+
+    # 6. H&M and Ward commitments conflicts
+    ward_query = "SELECT * FROM roster_entries WHERE entry_type IN ('hm_oncall', 'ibd_wards', 'liver_wards', 'consults')"
+    ward_params = []
+    if start_date:
+        ward_query += " AND date >= ?"
+        ward_params.append(start_date)
+    if end_date:
+        ward_query += " AND date <= ?"
+        ward_params.append(end_date)
+    ward_query += " ORDER BY date ASC"
+    ward_all = [dict(r) for r in conn.execute(ward_query, ward_params).fetchall()]
+
+    ward_conflicts = []
+    for w in ward_all:
+        doc = w.get("staff_name")
+        d_date = w.get("date")
+        l_info = is_on_leave(doc, d_date)
+        if l_info:
+            w_copy = dict(w)
+            w_copy["leave_type"] = l_info["leave_type"]
+            ward_conflicts.append(w_copy)
+
+    conn.close()
+
+    return {
+        "summary": {
+            "uncovered_clinics": sum(1 for c in clinic_slots if c.get("coverage_status") == "uncovered"),
+            "covered_clinics": sum(1 for c in clinic_slots if c.get("coverage_status") == "covered"),
+            "theatre_conflicts": len(theatre_conflicts),
+            "uncovered_theatre": sum(1 for t in theatre_conflicts if t.get("coverage_status") != "covered"),
+            "gicc_conflicts": len(gicc_conflicts),
+            "jc_conflicts": len(jc_conflicts),
+            "ward_oncall_conflicts": len(ward_conflicts),
+            "approved_leaves_count": len(leaves)
+        },
+        "clinic_slots": clinic_slots,
+        "theatre_conflicts": theatre_conflicts,
+        "gicc_conflicts": gicc_conflicts,
+        "jc_conflicts": jc_conflicts,
+        "ward_conflicts": ward_conflicts,
+        "leaves": leaves
+    }
+
+
 
