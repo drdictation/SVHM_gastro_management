@@ -2,14 +2,33 @@ import { createClient } from '@supabase/supabase-js';
 import initialSeed from './seed_data.json';
 import { createDefaultTheatreTemplates } from './theatreGrid';
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
-const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+const SUPABASE_URL = (typeof window !== 'undefined' && localStorage.getItem('svha_supabase_url')) || import.meta.env.VITE_SUPABASE_URL || '';
+const SUPABASE_KEY = (typeof window !== 'undefined' && localStorage.getItem('svha_supabase_key')) || import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
 export const isSupabaseConfigured = Boolean(SUPABASE_URL && SUPABASE_KEY);
 
 export const supabase = isSupabaseConfigured
   ? createClient(SUPABASE_URL, SUPABASE_KEY)
   : null;
+
+export function configureSupabaseCredentials(url, key) {
+  if (url && key) {
+    localStorage.setItem('svha_supabase_url', url.trim());
+    localStorage.setItem('svha_supabase_key', key.trim());
+  } else {
+    localStorage.removeItem('svha_supabase_url');
+    localStorage.removeItem('svha_supabase_key');
+  }
+  window.location.reload();
+}
+
+export function getSupabaseConfig() {
+  return {
+    url: SUPABASE_URL,
+    key: SUPABASE_KEY,
+    isConfigured: isSupabaseConfigured
+  };
+}
 
 // Local fallback store keys
 const LS_STAFF = 'svha_gastro_staff';
@@ -350,6 +369,22 @@ export const api = {
 
   // Clinic Roster
   async getClinicRoster(params = {}) {
+    if (isSupabaseConfigured) {
+      try {
+        let q = supabase.from('clinic_roster').select('*');
+        if (params.clinic_name) q = q.eq('clinic_name', params.clinic_name);
+        if (params.staff_name) q = q.ilike('staff_name', `%${params.staff_name}%`);
+        if (params.coverage_status) q = q.eq('coverage_status', params.coverage_status);
+        if (params.status) q = q.eq('status', params.status);
+        if (params.start_date) q = q.gte('date', params.start_date);
+        if (params.end_date) q = q.lte('date', params.end_date);
+        q = q.order('date').order('clinic_name');
+        const { data, error } = await q;
+        if (!error && data && data.length > 0) return data;
+      } catch (err) {
+        console.warn("Supabase clinic query error, falling back:", err);
+      }
+    }
     const cleanParams = Object.fromEntries(Object.entries(params).filter(([_, v]) => v !== undefined && v !== null && v !== ''));
     const qs = new URLSearchParams(cleanParams).toString();
     try {
@@ -383,6 +418,19 @@ export const api = {
   },
 
   async updateClinicCoverage(id, covering_staff_name, notes) {
+    if (isSupabaseConfigured) {
+      try {
+        const patch = {
+          covering_staff_name: covering_staff_name || null,
+          coverage_status: covering_staff_name ? 'covered' : 'uncovered',
+          notes: notes || null
+        };
+        const { data, error } = await supabase.from('clinic_roster').update(patch).eq('id', id).select();
+        if (!error && data?.length) return data[0];
+      } catch (e) {
+        console.warn("Supabase clinic cover error:", e);
+      }
+    }
     try {
       const res = await fetch(`/api/clinic-roster/${id}/cover`, {
         method: 'POST',
@@ -436,7 +484,40 @@ export const api = {
     };
   },
 
+  async getTheatreGrid(params = {}) {
+    if (isSupabaseConfigured) {
+      try {
+        let q = supabase.from('theatre_grid_entries').select('*');
+        if (params.date) q = q.eq('date', params.date);
+        if (params.staff_name) q = q.ilike('staff_name', `%${params.staff_name}%`);
+        if (params.start_date) q = q.gte('date', params.start_date);
+        if (params.end_date) q = q.lte('date', params.end_date);
+        q = q.order('date');
+        const { data, error } = await q;
+        if (!error && data && data.length > 0) return data;
+      } catch (e) {}
+    }
+    const cleanParams = Object.fromEntries(Object.entries(params).filter(([_, v]) => v !== undefined && v !== null && v !== ''));
+    const qs = new URLSearchParams(cleanParams).toString();
+    try {
+      const res = await fetch(`/api/theatre-grid${qs ? `?${qs}` : ''}`);
+      if (res.ok) return await res.json();
+    } catch (e) {}
+    return [];
+  },
+
   async updateTheatreCoverage(id, covering_staff_name, notes) {
+    if (isSupabaseConfigured) {
+      try {
+        const patch = {
+          covering_staff_name: covering_staff_name || null,
+          coverage_status: covering_staff_name ? 'covered' : 'uncovered',
+          notes: notes || null
+        };
+        const { data, error } = await supabase.from('theatre_grid_entries').update(patch).eq('id', id).select();
+        if (!error && data?.length) return data[0];
+      } catch (e) {}
+    }
     try {
       const res = await fetch(`/api/theatre-grid/${id}/cover`, {
         method: 'POST',
@@ -448,5 +529,20 @@ export const api = {
       // fallback
     }
     return null;
+  },
+
+  // Realtime multi-doctor sync listener
+  subscribeRealtime(onEvent) {
+    if (!isSupabaseConfigured || !supabase) return () => {};
+    const channel = supabase
+      .channel('department-changes')
+      .on('postgres_changes', { event: '*', schema: 'public' }, (payload) => {
+        if (onEvent) onEvent(payload);
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }
 };

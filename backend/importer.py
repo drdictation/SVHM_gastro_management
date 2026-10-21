@@ -347,6 +347,20 @@ def import_all():
     conn.close()
     print(f"Import complete: {count} roster entries, {staff_count} staff, {clinic_count} clinic entries, {theatre_count} theatre entries.")
 
+VIC_PUBLIC_HOLIDAYS_2026 = {
+    "2026-01-01": "PUBLIC HOLIDAY — New Year's Day (no clinic)",
+    "2026-01-26": "PUBLIC HOLIDAY — Australia Day (no clinic)",
+    "2026-03-09": "PUBLIC HOLIDAY — Labour Day (no clinic)",
+    "2026-04-03": "PUBLIC HOLIDAY — Good Friday (no clinic)",
+    "2026-04-06": "PUBLIC HOLIDAY — Easter Monday (no clinic)",
+    "2026-04-25": "PUBLIC HOLIDAY — ANZAC Day (no clinic)",
+    "2026-06-08": "PUBLIC HOLIDAY — King's Birthday (no clinic)",
+    "2026-09-25": "PUBLIC HOLIDAY — Friday before the AFL Grand Final (no clinic)",
+    "2026-11-03": "PUBLIC HOLIDAY — Melbourne Cup Day (no clinic)",
+    "2026-12-25": "PUBLIC HOLIDAY — Christmas Day (no clinic)",
+    "2026-12-28": "PUBLIC HOLIDAY — Boxing Day (substitute) (no clinic)",
+}
+
 def import_clinic_roster(conn):
     cur = conn.cursor()
     cur.execute("DELETE FROM clinic_roster")
@@ -371,12 +385,18 @@ def import_clinic_roster(conn):
         ws = wb[sheet_name]
         headers = [str(ws.cell(1, c).value or '').strip() for c in range(1, ws.max_column + 1)]
 
+        # 1. Parse Excel rows and collect clean non-holiday template rows for backfill
+        parsed_excel_rows = []
+        clean_template_rows = []
+        session_weekdays = set()
+
         for r in range(2, ws.max_row + 1):
             d_raw = ws.cell(r, 1).value
             d_val = parse_date(d_raw)
             if not d_val:
                 continue
             day_of_week = str(ws.cell(r, 2).value or '').strip()
+            session_weekdays.add(day_of_week)
 
             row_str = ' '.join([str(ws.cell(r, c).value or '') for c in range(1, ws.max_column + 1)])
             is_holiday_row = 'PUBLIC HOLIDAY' in row_str.upper()
@@ -388,6 +408,86 @@ def import_clinic_roster(conn):
                         holiday_note = val_c.strip()
                         break
 
+            parsed_excel_rows.append((d_val, day_of_week, r, is_holiday_row, holiday_note))
+            if not is_holiday_row and 'CLOSED' not in row_str.upper():
+                clean_template_rows.append((d_val, day_of_week, r))
+
+        if not parsed_excel_rows:
+            continue
+
+        first_excel_dt_str = parsed_excel_rows[0][0]
+        first_excel_dt = datetime.datetime.strptime(first_excel_dt_str, "%Y-%m-%d").date()
+
+        # 2. Backfill from 2026-01-01 up to first_excel_dt - 1 day
+        backfill_curr = datetime.date(2026, 1, 1)
+        while backfill_curr < first_excel_dt:
+            day_name = backfill_curr.strftime("%A")
+            if day_name in session_weekdays:
+                d_str = backfill_curr.strftime("%Y-%m-%d")
+                is_vic_holiday = d_str in VIC_PUBLIC_HOLIDAYS_2026
+                vic_holiday_note = VIC_PUBLIC_HOLIDAYS_2026.get(d_str)
+
+                # Find 4-week cycle template row from clean template rows
+                matched_row_idx = None
+                for t_dval, t_day, t_r in clean_template_rows:
+                    if t_day == day_name:
+                        t_dt = datetime.datetime.strptime(t_dval, "%Y-%m-%d").date()
+                        if (t_dt - backfill_curr).days % 28 == 0:
+                            matched_row_idx = t_r
+                            break
+
+                # Fallback to any clean row on same day of week if exact 28-day modulo not found
+                if matched_row_idx is None:
+                    for t_dval, t_day, t_r in clean_template_rows:
+                        if t_day == day_name:
+                            matched_row_idx = t_r
+                            break
+
+                for col_idx in range(3, len(headers) + 1):
+                    doc_key = headers[col_idx - 1]
+                    if not doc_key or doc_key in ['AMY', 'GEETHA']:
+                        continue
+                    staff_name = CLINIC_DOCTOR_MAP.get(doc_key)
+                    if not staff_name:
+                        continue
+
+                    if is_vic_holiday:
+                        cur.execute('''
+                            INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (sheet_name, d_str, day_name, staff_name, 'holiday', None, 'not_required', vic_holiday_note))
+                        continue
+
+                    raw_cell = ws.cell(matched_row_idx, col_idx).value if matched_row_idx else None
+                    cell_val = str(raw_cell).strip() if raw_cell is not None else ''
+                    cell_upper = cell_val.upper()
+
+                    if cell_val == '' or 'LEAVE' in cell_upper or cell_val in ['Unknown', 'jj']:
+                        # Baseline scheduled attendance
+                        cur.execute('''
+                            INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (sheet_name, d_str, day_name, staff_name, 'attending', None, 'not_required', None))
+                    elif cell_upper in ['X', '.']:
+                        cur.execute('''
+                            INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (sheet_name, d_str, day_name, staff_name, 'off_routine', None, 'not_required', None))
+                    elif 'CLOSED' in cell_upper:
+                        cur.execute('''
+                            INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (sheet_name, d_str, day_name, staff_name, 'closed', None, 'not_required', cell_val))
+                    else:
+                        cur.execute('''
+                            INSERT INTO clinic_roster (clinic_name, date, day_of_week, staff_name, status, leave_type, coverage_status, notes)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (sheet_name, d_str, day_name, staff_name, 'attending', None, 'not_required', cell_val))
+
+            backfill_curr += datetime.timedelta(days=1)
+
+        # 3. Insert original Excel rows (Dec 2026 onwards)
+        for d_val, day_of_week, r, is_holiday_row, holiday_note in parsed_excel_rows:
             for col_idx in range(3, len(headers) + 1):
                 doc_key = headers[col_idx - 1]
                 if not doc_key or doc_key in ['AMY', 'GEETHA']:

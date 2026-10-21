@@ -3,7 +3,7 @@ import {
   Calendar, RefreshCw, Mail, CheckCircle2, XCircle, ArrowRightLeft, 
   User, Clock, ShieldCheck, Download, ChevronLeft, ChevronRight, AlertTriangle, FileText, Send, Upload, KeyRound, Stethoscope, Trash2, Building2, PlusCircle
 } from 'lucide-react';
-import { api, isSupabaseConfigured } from './api';
+import { api, isSupabaseConfigured, configureSupabaseCredentials, getSupabaseConfig } from './api';
 import { generateLeavePdf } from './pdfGenerator';
 import { parseRosterFile, parseLeaveFile } from './rosterParser';
 import BulletinManager from './BulletinManager';
@@ -136,9 +136,22 @@ export default function App() {
   const [uploadedCount, setUploadedCount] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
 
-  // Load initial data
+  // Supabase Cloud Configuration Modal state
+  const [showSupabaseModal, setShowSupabaseModal] = useState(false);
+  const currentSupabaseConfig = useMemo(() => getSupabaseConfig(), []);
+  const [supabaseUrlInput, setSupabaseUrlInput] = useState(currentSupabaseConfig.url || '');
+  const [supabaseKeyInput, setSupabaseKeyInput] = useState(currentSupabaseConfig.key || '');
+
+  // Load initial data and subscribe to Supabase Realtime updates
   useEffect(() => {
     loadAll();
+    const unsub = api.subscribeRealtime?.((payload) => {
+      console.log("Supabase realtime update received:", payload);
+      loadAll();
+    });
+    return () => {
+      if (unsub) unsub();
+    };
   }, []);
 
   async function loadAll() {
@@ -624,9 +637,24 @@ export default function App() {
             <div className="flex items-center gap-2">
               <span className="bg-blue-700 text-xs uppercase tracking-wider font-semibold px-2 py-0.5 rounded">St Vincent's Melbourne</span>
               {isSupabaseConfigured ? (
-                <span className="bg-emerald-600 text-xs px-2 py-0.5 rounded flex items-center gap-1">● Supabase Active</span>
+                <button
+                  type="button"
+                  onClick={() => setShowSupabaseModal(true)}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-xs px-2.5 py-0.5 rounded flex items-center gap-1.5 cursor-pointer transition shadow"
+                  title="Supabase Active — Click to manage cloud sync"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-200 animate-pulse"></span>
+                  ● Supabase Active
+                </button>
               ) : (
-                <span className="bg-amber-600 text-xs px-2 py-0.5 rounded flex items-center gap-1">● Local/Client Store</span>
+                <button
+                  type="button"
+                  onClick={() => setShowSupabaseModal(true)}
+                  className="bg-amber-600 hover:bg-amber-500 text-xs px-2.5 py-0.5 rounded flex items-center gap-1.5 cursor-pointer transition shadow hover:scale-105"
+                  title="Running in Local Store mode — Click to connect Supabase Cloud"
+                >
+                  <span>⚡ Connect Supabase Cloud</span>
+                </button>
               )}
             </div>
             <h1 className="text-xl md:text-2xl font-bold mt-1">Gastroenterology Department Portal</h1>
@@ -1760,6 +1788,100 @@ export default function App() {
               >
                 Verify
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Supabase Cloud Connection Modal */}
+      {showSupabaseModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 text-slate-800 space-y-4">
+            <div className="flex items-start justify-between border-b pb-3">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                  Supabase Cloud Department Sync
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Synchronize department roster, leave, clinic cover, and endoscopy across all staff in real time.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSupabaseModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 font-bold text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="font-semibold block mb-1 text-slate-700">Project URL (VITE_SUPABASE_URL)</label>
+                <input
+                  type="text"
+                  value={supabaseUrlInput}
+                  onChange={(e) => setSupabaseUrlInput(e.target.value)}
+                  placeholder="https://xyzproject.supabase.co"
+                  className="w-full border p-2 rounded font-mono text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="font-semibold block mb-1 text-slate-700">Anon Public Key (VITE_SUPABASE_ANON_KEY)</label>
+                <input
+                  type="password"
+                  value={supabaseKeyInput}
+                  onChange={(e) => setSupabaseKeyInput(e.target.value)}
+                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  className="w-full border p-2 rounded font-mono text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded text-[11px] text-blue-900 space-y-1">
+                <p className="font-bold text-blue-950">Quick 2-Step Activation:</p>
+                <ol className="list-decimal list-inside space-y-1">
+                  <li>In Supabase SQL Editor, run <code className="bg-white px-1.5 py-0.5 rounded border border-blue-200 font-mono text-[10px]">supabase_schema.sql</code>.</li>
+                  <li>Run sync command: <code className="bg-white px-1.5 py-0.5 rounded border border-blue-200 font-mono text-[10px]">python3 backend/sync_to_supabase.py &lt;URL&gt; &lt;KEY&gt;</code> to upload all 15,000+ roster rows.</li>
+                </ol>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t">
+              {isSupabaseConfigured && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (confirm('Disconnect from Supabase and revert to local storage?')) {
+                      configureSupabaseCredentials('', '');
+                    }
+                  }}
+                  className="text-xs text-rose-600 hover:text-rose-800 font-semibold"
+                >
+                  Disconnect
+                </button>
+              )}
+              <div className="flex gap-2 ml-auto">
+                <button
+                  type="button"
+                  onClick={() => setShowSupabaseModal(false)}
+                  className="px-3.5 py-1.5 border rounded text-xs text-slate-600 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!supabaseUrlInput.trim() || !supabaseKeyInput.trim()) {
+                      alert('Please provide both Supabase Project URL and Anon Key');
+                      return;
+                    }
+                    configureSupabaseCredentials(supabaseUrlInput.trim(), supabaseKeyInput.trim());
+                  }}
+                  className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-bold shadow"
+                >
+                  Connect & Sync
+                </button>
+              </div>
             </div>
           </div>
         </div>
