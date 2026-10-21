@@ -90,8 +90,10 @@ export default function App() {
   const [leaveApplications, setLeaveApplications] = useState([]);
   const [leaveFilterMode, setLeaveFilterMode] = useState('all'); // 'all' | 'endo_clashes' | 'needs_cover'
   const [leaveSearch, setLeaveSearch] = useState('');
+  const [clinicEntries, setClinicEntries] = useState([]);
   const [leaveForm, setLeaveForm] = useState({
     staff_name: '',
+    applicant_email: '',
     employee_number: '',
     department: 'Gastroenterology',
     pay_in_advance: 'No',
@@ -118,19 +120,25 @@ export default function App() {
   }, []);
 
   async function loadAll() {
-    const [staff, roster, sw, lv, tmpl, overrides] = await Promise.all([
+    const [staff, roster, sw, lv, tmpl, overrides, clinics] = await Promise.all([
       api.getStaff(),
       api.getRoster(),
       api.getSwaps(),
       api.getLeave(),
       api.getTheatreTemplates(),
-      api.getEndoOverrides()
+      api.getEndoOverrides(),
+      api.getClinicRoster()
     ]);
     setStaffList(staff);
+    setClinicEntries(clinics || []);
     if (staff.length > 0 && !currentUser) {
       const def = staff.find(s => s.name.includes('Chamara')) || staff[0];
       setCurrentUser(def);
-      setLeaveForm(prev => ({ ...prev, staff_name: def.name }));
+      setLeaveForm(prev => ({
+        ...prev,
+        staff_name: def.name,
+        applicant_email: def.email || ''
+      }));
     }
     setRosterEntries(roster);
     setSwaps(sw);
@@ -172,6 +180,54 @@ export default function App() {
       endoOverrides
     );
   }, [leaveForm.staff_name, leaveForm.start_date, leaveForm.end_date, theatreTemplates, rosterEntries, endoOverrides]);
+
+  // Live Clinic Clashes on Leave Form
+  const liveFormClinicClashes = useMemo(() => {
+    if (!leaveForm.staff_name || !leaveForm.start_date || !clinicEntries.length) return [];
+    const start = leaveForm.start_date;
+    const end = leaveForm.end_date || leaveForm.start_date;
+    return clinicEntries.filter(c => {
+      if (!c.date || c.date < start || c.date > end) return false;
+      if (c.status === 'off_routine' || c.status === 'holiday' || c.status === 'closed') return false;
+      return matchDoctorName(c.staff_name, leaveForm.staff_name);
+    });
+  }, [leaveForm.staff_name, leaveForm.start_date, leaveForm.end_date, clinicEntries]);
+
+  // Live Email Recipients Preview
+  const liveFormRecipients = useMemo(() => {
+    const list = [];
+    const matchedDoc = staffList.find(s => matchDoctorName(s.name, leaveForm.staff_name));
+    const appEmail = (leaveForm.applicant_email || matchedDoc?.email || '').trim();
+    if (appEmail) {
+      list.push({ label: 'Applicant Copy', email: appEmail, trigger: 'Always' });
+    }
+    list.push({ label: 'Department Coordinator', email: 'anne.savage@svha.org.au', trigger: 'Always' });
+    if (liveFormClashes.endoClashes.length > 0) {
+      list.push({
+        label: 'Endoscopy Waiting List',
+        email: 'Endoscopy.Waitinglist@svhm.org.au',
+        trigger: `${liveFormClashes.endoClashes.length} Endoscopy clash${liveFormClashes.endoClashes.length > 1 ? 'es' : ''}`
+      });
+    }
+    if (liveFormClinicClashes.length > 0) {
+      list.push({
+        label: 'Clinic Case Coordination Team',
+        email: 'gastroenterology.cas@svha.org.au',
+        trigger: `${liveFormClinicClashes.length} Clinic clash${liveFormClinicClashes.length > 1 ? 'es' : ''}`
+      });
+    }
+    return list;
+  }, [leaveForm.applicant_email, leaveForm.staff_name, staffList, liveFormClashes.endoClashes, liveFormClinicClashes]);
+
+  // Auto-populate applicant email if staff changes and email is empty
+  useEffect(() => {
+    if (leaveForm.staff_name) {
+      const match = staffList.find(s => matchDoctorName(s.name, leaveForm.staff_name));
+      if (match?.email && !leaveForm.applicant_email) {
+        setLeaveForm(prev => ({ ...prev, applicant_email: match.email }));
+      }
+    }
+  }, [leaveForm.staff_name, staffList]);
 
   // Auto-populate SITE (ENDOSCOPY USE ONLY) when start/end dates detect endoscopy clashes
   useEffect(() => {
@@ -304,21 +360,46 @@ export default function App() {
     setTimeout(() => setStatusMsg(''), 4000);
   };
 
-  // Leave submission & auto-PDF
+  // Leave submission, auto-PDF download & email dispatch
   const submitLeaveApplication = async (e) => {
     e.preventDefault();
     setLeaveSubmitting(true);
     setLeaveSuccess(null);
     try {
       const autoSites = liveFormClashes.affectedSites.join(', ');
+      const matchedDoc = staffList.find(s => matchDoctorName(s.name, leaveForm.staff_name));
+      const appEmail = (leaveForm.applicant_email || matchedDoc?.email || '').trim();
       const payload = {
         ...leaveForm,
-        costing: leaveForm.costing || autoSites
+        applicant_email: appEmail,
+        costing: leaveForm.costing || autoSites,
+        endo_clashes: liveFormClashes.endoClashes,
+        clinic_clashes: liveFormClinicClashes
       };
       const record = await api.submitLeave(payload);
       setLeaveApplications(prev => [record, ...prev]);
-      generateLeavePdf(record);
-      setLeaveSuccess('Leave application logged, Theatre Grid clashes recorded, and official PDF downloaded!');
+
+      // 1. Download official hospital leave PDF directly onto the computer
+      await generateLeavePdf(record);
+
+      // 2. Format recipient confirmation message
+      const emailsList = record.email_recipients?.length > 0
+        ? record.email_recipients.join(', ')
+        : liveFormRecipients.map(r => r.email).join(', ');
+
+      if (record.email_dispatched) {
+        setLeaveSuccess(
+          `Official hospital leave PDF downloaded onto your computer! Notification email dispatched from gastroenterologystvincents@gmail.com to: ${emailsList}`
+        );
+      } else if (record.email_simulated) {
+        setLeaveSuccess(
+          `Official hospital leave PDF downloaded onto your computer! Notification queued for: ${emailsList} (Gmail App Password pending setup in .env).`
+        );
+      } else {
+        setLeaveSuccess(
+          `Official hospital leave PDF downloaded onto your computer! Notification prepared for: ${emailsList}`
+        );
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -826,6 +907,19 @@ export default function App() {
                     placeholder="e.g. 104829"
                   />
                 </div>
+                <div className="col-span-2">
+                  <label className="font-semibold block mb-1">Your Email (for PDF confirmation copy)</label>
+                  <input
+                    type="email"
+                    value={leaveForm.applicant_email}
+                    onChange={(e) => setLeaveForm({ ...leaveForm, applicant_email: e.target.value })}
+                    className="w-full border p-2 rounded"
+                    placeholder="doctor@svha.org.au"
+                  />
+                  <span className="text-[10.5px] text-slate-500">
+                    A copy of the official PDF and clash details will be emailed to you and the coordinator.
+                  </span>
+                </div>
                 <div>
                   <label className="font-semibold block mb-1">Leave Type</label>
                   <select
@@ -873,13 +967,13 @@ export default function App() {
                   />
                 </div>
 
-                {/* Live Theatre & Roster Clash Detector Box */}
+                {/* Live Theatre, Clinic & Roster Clash Detector Box */}
                 {leaveForm.start_date && (
                   <div className="col-span-2 rounded-lg border p-3 space-y-2.5 bg-slate-50 border-slate-200">
                     <div className="flex items-center justify-between">
                       <span className="font-bold text-slate-800 flex items-center gap-1.5">
                         <Stethoscope className="w-3.5 h-3.5 text-indigo-600" />
-                        Theatre Grid & Roster Alignment
+                        Live Clash Inspection & Routing
                       </span>
                       {liveFormClashes.cycleWeeks.length > 0 && (
                         <span className="bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-full font-bold text-[10px]">
@@ -891,9 +985,14 @@ export default function App() {
                     {/* Endoscopy Clashes */}
                     {liveFormClashes.endoClashes.length > 0 ? (
                       <div className="p-2.5 bg-rose-50 border border-rose-200 rounded space-y-1.5">
-                        <div className="font-bold text-rose-800 flex items-center gap-1">
-                          <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
-                          {liveFormClashes.endoClashes.length} Endoscopy / Theatre List {liveFormClashes.endoClashes.length === 1 ? 'Clash' : 'Clashes'} Detected:
+                        <div className="font-bold text-rose-800 flex items-center justify-between text-xs">
+                          <span className="flex items-center gap-1">
+                            <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                            {liveFormClashes.endoClashes.length} Endoscopy / Theatre {liveFormClashes.endoClashes.length === 1 ? 'Clash' : 'Clashes'}:
+                          </span>
+                          <span className="text-[10px] bg-rose-100 text-rose-800 px-1.5 py-0.5 rounded font-medium">
+                            Notifies Endoscopy Waitinglist
+                          </span>
                         </div>
                         <ul className="space-y-1 max-h-36 overflow-y-auto pr-1">
                           {liveFormClashes.endoClashes.map((c, i) => (
@@ -909,28 +1008,60 @@ export default function App() {
                         </ul>
                       </div>
                     ) : (
-                      <div className="p-2 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded flex items-center gap-1.5 font-medium">
+                      <div className="p-2 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded flex items-center gap-1.5 font-medium text-[11px]">
                         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                         No Endoscopy (`ENDO` / `Gas/Colon`) lists affected during these dates.
                       </div>
                     )}
 
+                    {/* Outpatient Clinic Clashes */}
+                    {liveFormClinicClashes.length > 0 ? (
+                      <div className="p-2.5 bg-amber-50 border border-amber-200 rounded space-y-1.5">
+                        <div className="font-bold text-amber-900 flex items-center justify-between text-xs">
+                          <span className="flex items-center gap-1">
+                            <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                            {liveFormClinicClashes.length} Outpatient Clinic {liveFormClinicClashes.length === 1 ? 'Clash' : 'Clashes'}:
+                          </span>
+                          <span className="text-[10px] bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded font-medium">
+                            Notifies Clinic Case Coordination
+                          </span>
+                        </div>
+                        <ul className="space-y-1 max-h-36 overflow-y-auto pr-1">
+                          {liveFormClinicClashes.map((cl, i) => (
+                            <li key={i} className="text-[11px] bg-white px-2 py-1 rounded border border-amber-200 flex items-center justify-between">
+                              <span>
+                                <strong className="text-slate-900">{cl.day_of_week || ''} {formatDDMMYYYY(cl.date)}</strong> — {cl.clinic_name}
+                              </span>
+                              <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-semibold">
+                                {cl.covering_staff_name ? `Covered by ${cl.covering_staff_name}` : 'Uncovered'}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : (
+                      <div className="p-2 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded flex items-center gap-1.5 font-medium text-[11px]">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        No Outpatient Clinics scheduled during these dates.
+                      </div>
+                    )}
+
                     {/* Department Roster Clashes */}
                     {liveFormClashes.rosterClashes.length > 0 && (
-                      <div className="p-2.5 bg-amber-50 border border-amber-200 rounded space-y-1.5">
-                        <div className="font-bold text-amber-900">
+                      <div className="p-2.5 bg-slate-100 border border-slate-200 rounded space-y-1.5">
+                        <div className="font-bold text-slate-800 text-xs">
                           {liveFormClashes.rosterClashes.length} Department Roster {liveFormClashes.rosterClashes.length === 1 ? 'Duty' : 'Duties'} Affected:
                         </div>
                         <ul className="space-y-1">
                           {liveFormClashes.rosterClashes.map(rc => (
-                            <li key={rc.id} className="text-[11px] bg-white px-2 py-1 rounded border border-amber-200 flex items-center justify-between">
+                            <li key={rc.id} className="text-[11px] bg-white px-2 py-1 rounded border border-slate-200 flex items-center justify-between">
                               <span>
                                 <strong>{formatDDMMYYYY(rc.date)}</strong>: {rc.title} ({rc.role_label})
                               </span>
                               <button
                                 type="button"
                                 onClick={() => handleOpenSwapModal(rc)}
-                                className="text-[10px] bg-amber-600 text-white px-1.5 py-0.5 rounded hover:bg-amber-700"
+                                className="text-[10px] bg-blue-600 text-white px-1.5 py-0.5 rounded hover:bg-blue-700"
                               >
                                 Swap
                               </button>
@@ -939,6 +1070,32 @@ export default function App() {
                         </ul>
                       </div>
                     )}
+
+                    {/* Live Email Routing Box */}
+                    <div className="p-2.5 bg-blue-50/70 border border-blue-200 rounded space-y-1.5">
+                      <div className="font-bold text-blue-900 flex items-center justify-between text-[11px]">
+                        <span className="flex items-center gap-1">
+                          <Mail className="w-3.5 h-3.5 text-blue-700" />
+                          Email Notification Dispatch (from gastroenterologystvincents@gmail.com):
+                        </span>
+                        <span className="text-[10px] bg-blue-200/80 text-blue-900 px-1.5 py-0.5 rounded font-semibold">
+                          {liveFormRecipients.length} recipient{liveFormRecipients.length > 1 ? 's' : ''}
+                        </span>
+                      </div>
+                      <div className="space-y-1 text-[11px]">
+                        {liveFormRecipients.map((r, i) => (
+                          <div key={i} className="bg-white p-1.5 rounded border border-blue-100 flex items-center justify-between gap-1">
+                            <div>
+                              <span className="font-semibold text-slate-800">{r.label}:</span>{' '}
+                              <code className="text-blue-700 text-[10.5px]">{r.email}</code>
+                            </div>
+                            <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium shrink-0">
+                              {r.trigger}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 )}
 
@@ -980,7 +1137,7 @@ export default function App() {
                 className="w-full bg-blue-700 hover:bg-blue-800 text-white font-medium py-2.5 rounded text-xs flex items-center justify-center gap-2"
               >
                 <Download className="w-4 h-4" />
-                {leaveSubmitting ? 'Submitting...' : 'Submit Leave & Download Official PDF'}
+                {leaveSubmitting ? 'Submitting & Dispatching...' : 'Submit Leave, Download Official PDF & Dispatch Emails'}
               </button>
             </form>
 

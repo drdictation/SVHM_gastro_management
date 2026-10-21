@@ -141,15 +141,38 @@ export const api = {
   },
 
   async submitLeave(form) {
+    let backendResult = null;
+    try {
+      const res = await fetch('/api/leave', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form)
+      });
+      if (res.ok) {
+        backendResult = await res.json();
+      }
+    } catch (e) {
+      console.warn('Backend /api/leave call note:', e);
+    }
+
     const record = {
       ...form,
-      id: Date.now(),
+      id: backendResult?.id || Date.now(),
       created_at: new Date().toISOString(),
-      status: form.status || 'approved'
+      status: form.status || 'approved',
+      email_dispatched: backendResult?.email_dispatched ?? false,
+      email_simulated: backendResult?.email_simulated ?? false,
+      email_recipients: backendResult?.email_recipients || [],
+      email_message: backendResult?.email_message || ''
     };
+
     if (isSupabaseConfigured) {
-      const { data } = await supabase.from('leave_applications').insert([record]).select();
-      if (data && data[0]) return data[0];
+      try {
+        const { data } = await supabase.from('leave_applications').insert([record]).select();
+        if (data && data[0]) return { ...data[0], ...record };
+      } catch (err) {
+        console.warn('Supabase insert error', err);
+      }
     }
     const current = JSON.parse(localStorage.getItem(LS_LEAVE) || '[]');
     current.unshift(record);

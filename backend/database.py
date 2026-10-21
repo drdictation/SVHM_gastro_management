@@ -59,6 +59,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS leave_applications (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         staff_name TEXT NOT NULL,
+        applicant_email TEXT,
         employee_number TEXT,
         department TEXT DEFAULT 'Gastroenterology',
         pay_in_advance TEXT DEFAULT 'No',

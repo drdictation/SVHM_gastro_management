@@ -2,14 +2,28 @@ import os
 import sqlite3
 import datetime
 import uuid
+import re
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from backend.mailer import send_leave_email, COORDINATOR_EMAIL, ENDOSCOPY_WAITINGLIST_EMAIL, CLINIC_COORDINATION_EMAIL, GMAIL_USER, GMAIL_APP_PASSWORD
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gastro_roster.db")
 
 app = FastAPI(title="St Vincent's Gastro Roster API", version="1.0.0")
+
+def norm_doc_name(name):
+    if not name:
+        return ""
+    return re.sub(r'^(assoc\.?\s*prof\.?|prof\.?|dr\.?|mr\.?|ms\.?)\s*', '', str(name).strip(), flags=re.I).lower().replace('.', '').strip()
+
+def matches_doc(a, b):
+    na = norm_doc_name(a)
+    nb = norm_doc_name(b)
+    if not na or not nb:
+        return False
+    return na == nb or na in nb or nb in na
 
 app.add_middleware(
     CORSMiddleware,
@@ -323,7 +337,8 @@ def get_ical(staff_name: Optional[str] = Query(None)):
 # 8. Leave Form Applications & PDF Generation
 class LeaveApplicationCreate(BaseModel):
     staff_name: str
-    employee_number: str
+    employee_number: Optional[str] = ""
+    applicant_email: Optional[str] = ""
     department: Optional[str] = "Gastroenterology"
     pay_in_advance: Optional[str] = "No"  # "Yes" or "No"
     leave_type: str
@@ -335,6 +350,8 @@ class LeaveApplicationCreate(BaseModel):
     allowances: Optional[str] = ""
     submission_date: Optional[str] = ""
     manager_name: Optional[str] = ""
+    endo_clashes: Optional[List[dict]] = None
+    clinic_clashes: Optional[List[dict]] = None
 
 def format_aus_date(val: str) -> str:
     """Format string into DD/MM/YYYY format."""
@@ -353,6 +370,23 @@ def format_aus_date(val: str) -> str:
                 return f"{int(parts[2]):02d}/{int(parts[1]):02d}/{parts[0]}"
             # Or DD-MM-YYYY
             return f"{int(parts[0]):02d}/{int(parts[1]):02d}/{parts[2]}"
+    return val
+
+def to_iso_date(val: str) -> str:
+    """Format string into YYYY-MM-DD format."""
+    if not val:
+        return ""
+    val = val.strip()
+    if "/" in val:
+        parts = val.split("/")
+        if len(parts) == 3:
+            return f"{parts[2]}-{int(parts[1]):02d}-{int(parts[0]):02d}"
+    if "-" in val:
+        parts = val.split("-")
+        if len(parts) == 3:
+            if len(parts[0]) == 4:
+                return f"{parts[0]}-{int(parts[1]):02d}-{int(parts[2]):02d}"
+            return f"{parts[2]}-{int(parts[1]):02d}-{int(parts[0]):02d}"
     return val
 
 def generate_leave_pdf_bytes(data: dict) -> bytes:
@@ -411,19 +445,56 @@ def create_leave_application(app_data: LeaveApplicationCreate):
     now = datetime.datetime.now().isoformat()
     start_aus = format_aus_date(app_data.start_date)
     end_aus = format_aus_date(app_data.end_date)
+    start_iso = to_iso_date(app_data.start_date)
+    end_iso = to_iso_date(app_data.end_date)
     sub_date = format_aus_date(app_data.submission_date or datetime.date.today().strftime("%d/%m/%Y"))
 
+    # 1. Resolve applicant email if not explicitly provided
+    applicant_email = (app_data.applicant_email or "").strip()
+    if not applicant_email:
+        staff_rows = conn.execute("SELECT * FROM staff").fetchall()
+        for s in staff_rows:
+            if matches_doc(s["name"], app_data.staff_name) and s["email"]:
+                applicant_email = s["email"].strip()
+                break
+
+    # 2. Resolve endoscopy clashes (theatre grid)
+    endo_clashes = app_data.endo_clashes
+    if endo_clashes is None:
+        endo_rows = conn.execute(
+            "SELECT * FROM theatre_grid_entries WHERE date >= ? AND date <= ? ORDER BY date ASC, session ASC",
+            (start_iso, end_iso)
+        ).fetchall()
+        endo_clashes = []
+        for r in endo_rows:
+            if matches_doc(r["staff_name"], app_data.staff_name):
+                endo_clashes.append(dict(r))
+
+    # 3. Resolve outpatient clinic clashes
+    clinic_clashes = app_data.clinic_clashes
+    if clinic_clashes is None:
+        clinic_rows = conn.execute(
+            "SELECT * FROM clinic_roster WHERE date >= ? AND date <= ? AND status NOT IN ('off_routine', 'holiday', 'closed') ORDER BY date ASC",
+            (start_iso, end_iso)
+        ).fetchall()
+        clinic_clashes = []
+        for r in clinic_rows:
+            if matches_doc(r["staff_name"], app_data.staff_name):
+                clinic_clashes.append(dict(r))
+
+    # 4. Insert into database
     cur = conn.cursor()
     cur.execute(
         """
         INSERT INTO leave_applications (
-            staff_name, employee_number, department, pay_in_advance,
+            staff_name, applicant_email, employee_number, department, pay_in_advance,
             leave_type, start_date, end_date, leave_hours, leave_balance,
             costing, allowances, submission_date, status, manager_name, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)
         """,
         (
             app_data.staff_name,
+            applicant_email,
             app_data.employee_number,
             app_data.department or "Gastroenterology",
             app_data.pay_in_advance or "No",
@@ -435,15 +506,28 @@ def create_leave_application(app_data: LeaveApplicationCreate):
             app_data.costing or "",
             app_data.allowances or "",
             sub_date,
-            app_data.manager_name or "",
+            app_data.manager_name or "Prof. Alex Thompson",
             now
         )
     )
     leave_id = cur.lastrowid
 
+    # 5. Generate official PDF bytes and dispatch email
+    leave_dict = app_data.dict()
+    leave_dict["id"] = leave_id
+    leave_dict["applicant_email"] = applicant_email
+    pdf_bytes = generate_leave_pdf_bytes(leave_dict)
+
+    email_res = send_leave_email(leave_dict, pdf_bytes, endo_clashes, clinic_clashes)
+
+    # 6. Audit log
+    details_str = (
+        f"Leave application #{leave_id} submitted for {start_aus} to {end_aus}. "
+        f"Recipients: {', '.join(email_res.get('recipients', []))}. Status: {email_res.get('message', '')}"
+    )
     conn.execute(
         "INSERT INTO audit_logs (timestamp, actor, action, details) VALUES (?, ?, ?, ?)",
-        (now, app_data.staff_name, "LEAVE_SUBMITTED", f"Leave application #{leave_id} submitted for {start_aus} to {end_aus}")
+        (now, app_data.staff_name, "LEAVE_SUBMITTED", details_str)
     )
     conn.commit()
     conn.close()
@@ -451,9 +535,37 @@ def create_leave_application(app_data: LeaveApplicationCreate):
     return {
         "success": True,
         "id": leave_id,
-        "message": "Leave application recorded successfully.",
-        "download_url": f"/api/leave/{leave_id}/pdf"
+        "message": f"Leave application recorded successfully. {email_res.get('message', '')}",
+        "download_url": f"/api/leave/{leave_id}/pdf",
+        "email_dispatched": email_res.get("success", False),
+        "email_simulated": email_res.get("simulated", False),
+        "email_recipients": email_res.get("recipients", []),
+        "email_message": email_res.get("message", ""),
+        "endo_clashes_count": len(endo_clashes),
+        "clinic_clashes_count": len(clinic_clashes)
     }
+
+@app.post("/api/leave/test-email")
+def test_leave_email_route(to_email: Optional[str] = Query(None)):
+    """Test endpoint to verify Gmail SMTP delivery to a specified address."""
+    target = to_email or "anne.savage@svha.org.au"
+    dummy_leave = {
+        "staff_name": "Test Clinical Specialist",
+        "employee_number": "109876",
+        "applicant_email": target,
+        "leave_type": "Annual Leave",
+        "start_date": "2026-11-02",
+        "end_date": "2026-11-06",
+        "leave_hours": "38",
+        "manager_name": "Prof. Alex Thompson"
+    }
+    dummy_pdf = generate_leave_pdf_bytes(dummy_leave)
+    return send_leave_email(
+        dummy_leave,
+        dummy_pdf,
+        [{"date": "2026-11-02", "session": "AM", "room": "ENDO 1", "listType": "Colonoscopy", "coverDoctor": "Uncovered"}],
+        [{"date": "2026-11-03", "clinic_name": "IBD Clinic", "covering_staff_name": "Vacant"}]
+    )
 
 @app.get("/api/leave")
 def list_leave_applications(staff_name: Optional[str] = Query(None)):
