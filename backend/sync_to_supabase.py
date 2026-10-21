@@ -13,10 +13,12 @@ import sys
 import os
 import sqlite3
 import json
+import ssl
 import urllib.request
 import urllib.error
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "gastro_roster.db")
+SSL_CTX = ssl._create_unverified_context()
 
 def chunker(seq, size):
     return (seq[pos:pos + size] for pos in range(0, len(seq), size))
@@ -38,7 +40,7 @@ def postgrest_insert(url, key, table, rows):
         data = json.dumps(batch).encode('utf-8')
         req = urllib.request.Request(endpoint, data=data, headers=headers, method='POST')
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, context=SSL_CTX) as resp:
                 inserted += len(batch)
                 print(f"  [{table}] Uploaded {inserted}/{total} rows...", end='\r')
         except urllib.error.HTTPError as e:
