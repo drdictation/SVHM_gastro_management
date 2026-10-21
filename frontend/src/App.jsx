@@ -9,6 +9,7 @@ import { parseRosterFile, parseLeaveFile } from './rosterParser';
 import BulletinManager from './BulletinManager';
 import TheatreGridManager from './TheatreGridManager';
 import ClinicManager from './ClinicManager';
+import initialSeed from './seed_data.json';
 import clinicSeedData from './clinic_roster_seed.json';
 import {
   DAYS_OF_WEEK,
@@ -141,31 +142,44 @@ export default function App() {
   }, []);
 
   async function loadAll() {
-    const [staff, roster, sw, lv, tmpl, overrides, clinics] = await Promise.all([
-      api.getStaff(),
-      api.getRoster(),
-      api.getSwaps(),
-      api.getLeave(),
-      api.getTheatreTemplates(),
-      api.getEndoOverrides(),
-      api.getClinicRoster()
-    ]);
-    setStaffList(staff);
-    setClinicEntries(clinics || []);
-    if (staff.length > 0 && !currentUser) {
-      const def = staff.find(s => s.name.includes('Chamara')) || staff[0];
-      setCurrentUser(def);
-      setLeaveForm(prev => ({
-        ...prev,
-        staff_name: def.name,
-        applicant_email: def.email || ''
-      }));
+    try {
+      const [staff, roster, sw, lv, tmpl, overrides, clinics] = await Promise.all([
+        api.getStaff().catch(() => initialSeed.staff || []),
+        api.getRoster().catch(() => initialSeed.roster || []),
+        api.getSwaps().catch(() => []),
+        api.getLeave().catch(() => initialSeed.leave || []),
+        api.getTheatreTemplates().catch(() => createDefaultTheatreTemplates()),
+        api.getEndoOverrides().catch(() => ({})),
+        api.getClinicRoster().catch(() => clinicSeedData?.clinics || [])
+      ]);
+      const safeStaff = (staff && staff.length > 0) ? staff : (initialSeed.staff || []);
+      const safeRoster = (roster && roster.length > 0) ? roster : (initialSeed.roster || []);
+      const safeLeave = (lv && lv.length > 0) ? lv : (initialSeed.leave || []);
+      const safeClinics = (clinics && clinics.length > 0) ? clinics : (clinicSeedData?.clinics || []);
+
+      setStaffList(safeStaff);
+      setClinicEntries(safeClinics);
+      if (safeStaff.length > 0 && !currentUser) {
+        const def = safeStaff.find(s => s.name.includes('Chamara')) || safeStaff[0];
+        setCurrentUser(def);
+        setLeaveForm(prev => ({
+          ...prev,
+          staff_name: def.name,
+          applicant_email: def.email || ''
+        }));
+      }
+      setRosterEntries(safeRoster);
+      setSwaps(sw || []);
+      setLeaveApplications(safeLeave);
+      setTheatreTemplates(tmpl || createDefaultTheatreTemplates());
+      setEndoOverrides(overrides || {});
+    } catch (err) {
+      console.error("Critical error in loadAll:", err);
+      setStaffList(initialSeed.staff || []);
+      setRosterEntries(initialSeed.roster || []);
+      setLeaveApplications(initialSeed.leave || []);
+      setClinicEntries(clinicSeedData?.clinics || []);
     }
-    setRosterEntries(roster);
-    setSwaps(sw);
-    setLeaveApplications(lv);
-    setTheatreTemplates(tmpl);
-    setEndoOverrides(overrides);
   }
 
   // Week navigation

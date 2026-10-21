@@ -20,41 +20,43 @@ const LS_THEATRE_TEMPLATES = 'svha_gastro_theatre_templates_v2_all_weeks';
 const LS_ENDO_OVERRIDES = 'svha_gastro_endo_overrides_v1';
 const LS_LEAVE_SEED_VER = 'svha_gastro_leave_seed_v3_theatre';
 const LS_ROSTER_SEED_VER = 'svha_gastro_roster_seed_v2_gicc_fjc';
-const LS_CLINIC_SEED_VER = 'svha_gastro_clinic_seed_v3_fgc';
-const LS_CLINIC_ROSTER = 'svha_gastro_clinic_roster';
+const LS_CLINIC_OVERRIDES = 'svha_gastro_clinic_overrides_v1';
 
 // Init local storage if empty or if leave seed was updated from V2 Dec 26 CSV
 function initLocalStore() {
-  if (!localStorage.getItem(LS_STAFF)) {
-    localStorage.setItem(LS_STAFF, JSON.stringify(initialSeed.staff));
-  }
-  if (localStorage.getItem(LS_ROSTER_SEED_VER) !== '1') {
-    localStorage.setItem(LS_ROSTER, JSON.stringify(initialSeed.roster));
-    localStorage.setItem(LS_ROSTER_SEED_VER, '1');
-  } else if (!localStorage.getItem(LS_ROSTER)) {
-    localStorage.setItem(LS_ROSTER, JSON.stringify(initialSeed.roster));
-  }
-  if (!localStorage.getItem(LS_SWAPS)) {
-    localStorage.setItem(LS_SWAPS, JSON.stringify([]));
-  }
-  if (!localStorage.getItem(LS_THEATRE_TEMPLATES)) {
-    localStorage.setItem(LS_THEATRE_TEMPLATES, JSON.stringify(createDefaultTheatreTemplates()));
-  }
-  if (!localStorage.getItem(LS_ENDO_OVERRIDES)) {
-    localStorage.setItem(LS_ENDO_OVERRIDES, JSON.stringify({}));
-  }
-  if (localStorage.getItem(LS_LEAVE_SEED_VER) !== '1') {
-    localStorage.setItem(LS_STAFF, JSON.stringify(initialSeed.staff));
-    localStorage.setItem(LS_LEAVE, JSON.stringify(initialSeed.leave || []));
-    localStorage.setItem(LS_LEAVE_SEED_VER, '1');
-  } else if (!localStorage.getItem(LS_LEAVE)) {
-    localStorage.setItem(LS_LEAVE, JSON.stringify(initialSeed.leave || []));
-  }
-  if (localStorage.getItem(LS_CLINIC_SEED_VER) !== '1') {
-    import('./clinic_roster_seed.json').then(seedMod => {
-      localStorage.setItem(LS_CLINIC_ROSTER, JSON.stringify(seedMod.default?.clinics || []));
-      localStorage.setItem(LS_CLINIC_SEED_VER, '1');
-    }).catch(() => {});
+  // Always purge oversized clinic dumps to keep localStorage healthy (< 500KB)
+  try {
+    localStorage.removeItem('svha_gastro_clinic_roster');
+  } catch (e) {}
+
+  try {
+    if (!localStorage.getItem(LS_STAFF)) {
+      localStorage.setItem(LS_STAFF, JSON.stringify(initialSeed.staff));
+    }
+    if (localStorage.getItem(LS_ROSTER_SEED_VER) !== '1') {
+      localStorage.setItem(LS_ROSTER, JSON.stringify(initialSeed.roster));
+      localStorage.setItem(LS_ROSTER_SEED_VER, '1');
+    } else if (!localStorage.getItem(LS_ROSTER)) {
+      localStorage.setItem(LS_ROSTER, JSON.stringify(initialSeed.roster));
+    }
+    if (!localStorage.getItem(LS_SWAPS)) {
+      localStorage.setItem(LS_SWAPS, JSON.stringify([]));
+    }
+    if (!localStorage.getItem(LS_THEATRE_TEMPLATES)) {
+      localStorage.setItem(LS_THEATRE_TEMPLATES, JSON.stringify(createDefaultTheatreTemplates()));
+    }
+    if (!localStorage.getItem(LS_ENDO_OVERRIDES)) {
+      localStorage.setItem(LS_ENDO_OVERRIDES, JSON.stringify({}));
+    }
+    if (localStorage.getItem(LS_LEAVE_SEED_VER) !== '1') {
+      localStorage.setItem(LS_STAFF, JSON.stringify(initialSeed.staff));
+      localStorage.setItem(LS_LEAVE, JSON.stringify(initialSeed.leave || []));
+      localStorage.setItem(LS_LEAVE_SEED_VER, '1');
+    } else if (!localStorage.getItem(LS_LEAVE)) {
+      localStorage.setItem(LS_LEAVE, JSON.stringify(initialSeed.leave || []));
+    }
+  } catch (err) {
+    console.warn("Storage quota warning, clearing non-essential keys:", err);
   }
 }
 initLocalStore();
@@ -66,7 +68,21 @@ export const api = {
       const { data, error } = await supabase.from('staff').select('*').order('name');
       if (!error && data?.length) return data;
     }
-    return JSON.parse(localStorage.getItem(LS_STAFF) || '[]');
+    try {
+      const res = await fetch('/api/staff');
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.length) return data;
+      }
+    } catch (e) {}
+    try {
+      const saved = localStorage.getItem(LS_STAFF);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed?.length) return parsed;
+      }
+    } catch (e) {}
+    return initialSeed.staff || [];
   },
 
   // Roster entries
@@ -75,7 +91,21 @@ export const api = {
       const { data, error } = await supabase.from('roster_entries').select('*').order('date');
       if (!error && data?.length) return data;
     }
-    return JSON.parse(localStorage.getItem(LS_ROSTER) || '[]');
+    try {
+      const res = await fetch('/api/roster');
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.length) return data;
+      }
+    } catch (e) {}
+    try {
+      const saved = localStorage.getItem(LS_ROSTER);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed?.length) return parsed;
+      }
+    } catch (e) {}
+    return initialSeed.roster || [];
   },
 
   async bulkAddRoster(entries) {
@@ -331,12 +361,18 @@ export const api = {
       // fallback
     }
     const seed = (await import('./clinic_roster_seed.json')).default;
-    let list = JSON.parse(localStorage.getItem(LS_CLINIC_ROSTER) || 'null');
-    if (!list || localStorage.getItem(LS_CLINIC_SEED_VER) !== '1') {
-      list = seed.clinics || [];
-      localStorage.setItem(LS_CLINIC_ROSTER, JSON.stringify(list));
-      localStorage.setItem(LS_CLINIC_SEED_VER, '1');
-    }
+    let overrides = {};
+    try {
+      overrides = JSON.parse(localStorage.getItem(LS_CLINIC_OVERRIDES) || '{}');
+    } catch (e) {}
+
+    let list = (seed?.clinics || []).map(c => {
+      if (overrides[c.id]) {
+        return { ...c, ...overrides[c.id] };
+      }
+      return c;
+    });
+
     if (params.clinic_name) list = list.filter(c => c.clinic_name === params.clinic_name);
     if (params.staff_name) list = list.filter(c => c.staff_name?.toLowerCase().includes(params.staff_name.toLowerCase()));
     if (params.coverage_status) list = list.filter(c => c.coverage_status === params.coverage_status);
@@ -357,16 +393,16 @@ export const api = {
     } catch (e) {
       // fallback
     }
-    const list = JSON.parse(localStorage.getItem('svha_gastro_clinic_roster') || '[]');
-    const idx = list.findIndex(c => c.id === id);
-    if (idx !== -1) {
-      list[idx].covering_staff_name = covering_staff_name || null;
-      list[idx].coverage_status = covering_staff_name ? 'covered' : 'uncovered';
-      if (notes) list[idx].notes = notes;
-      localStorage.setItem('svha_gastro_clinic_roster', JSON.stringify(list));
-      return list[idx];
-    }
-    return null;
+    try {
+      const overrides = JSON.parse(localStorage.getItem(LS_CLINIC_OVERRIDES) || '{}');
+      if (covering_staff_name) {
+        overrides[id] = { covering_staff_name, coverage_status: 'covered', notes: notes || null };
+      } else {
+        delete overrides[id];
+      }
+      localStorage.setItem(LS_CLINIC_OVERRIDES, JSON.stringify(overrides));
+    } catch (e) {}
+    return { id, covering_staff_name, coverage_status: covering_staff_name ? 'covered' : 'uncovered', notes };
   },
 
   async getLeaveCoverageCoordinator(params = {}) {
